@@ -219,7 +219,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runBusy {
                 openTabs.filter { it.dirty }.forEach { saveNow(it) }
                 val result = driveSync.sync(accessToken, library.folders) { message ->
-                    withContext(Dispatchers.Main) { statusMessage = message }
+                    viewModelScope.launch { statusMessage = message }
                 }
                 library = repository.rebuildLibrary(result.folders)
                 statusMessage = "Drive sync: ${result.uploaded} uploaded, ${result.downloaded} downloaded" +
