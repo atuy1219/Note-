@@ -36,7 +36,18 @@ jobs:
           gradle-version: '8.11.1'
 
       - name: Build and test
-        run: gradle :app:assembleDebug :app:testDebugUnitTest --stacktrace
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if gradle :app:assembleDebug :app:testDebugUnitTest --stacktrace; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Gradle attempt $attempt failed; retrying dependency resolution..."
+              sleep $((attempt * 20))
+            fi
+          done
+          exit 1
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
