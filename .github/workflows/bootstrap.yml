@@ -1,9 +1,10 @@
 name: Bootstrap project
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/note-app
+      - main
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: write
@@ -11,9 +12,10 @@ permissions:
 jobs:
   bootstrap:
     runs-on: ubuntu-latest
-    if: github.event.head_commit.message != 'Implement Android note app'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: agent/note-app
       - name: Materialize project
         shell: bash
         run: |
