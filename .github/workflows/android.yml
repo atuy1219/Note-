@@ -5,6 +5,9 @@ on:
     branches:
       - main
       - 'agent/**'
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: write
