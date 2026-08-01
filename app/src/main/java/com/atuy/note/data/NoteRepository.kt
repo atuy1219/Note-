@@ -168,14 +168,18 @@ class NoteRepository(private val context: Context) {
     fun noteFileById(id: String): File = noteFile(id)
 
     fun readDocument(file: File): NoteDocument? = runCatching {
-        ZipInputStream(BufferedInputStream(FileInputStream(file))).use { zip ->
-            while (true) {
-                val entry = zip.nextEntry ?: return@use null
-                if (entry.name == "manifest.json") return@use json.decodeFromString<NoteDocument>(zip.readBytes().decodeToString())
-                zip.closeEntry()
+    var document: NoteDocument? = null
+    ZipInputStream(BufferedInputStream(FileInputStream(file))).use { zip ->
+        while (document == null) {
+            val entry = zip.nextEntry ?: break
+            if (entry.name == "manifest.json") {
+                document = json.decodeFromString<NoteDocument>(zip.readBytes().decodeToString())
             }
+            zip.closeEntry()
         }
-    }.getOrNull()
+    }
+    document
+}.getOrNull()
 
 
     fun replaceFromRemoteBlocking(tempFile: File) {
