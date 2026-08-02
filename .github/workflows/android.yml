@@ -27,6 +27,7 @@ jobs:
           cat scripts/.payload_text/ink.* > app/src/main/java/com/atuy/note/ink/InkPageView.kt
           cat scripts/.payload_text/vm.* > app/src/main/java/com/atuy/note/MainViewModel.kt
           cat scripts/.payload_text/apply.* > /tmp/apply_storage_lasso.py
+          sed -i 's/^             Spacer(Modifier.width(6.dp))/            Spacer(Modifier.width(6.dp))/' /tmp/apply_storage_lasso.py
           python /tmp/apply_storage_lasso.py
 
       - name: Set up JDK 17
