@@ -13,11 +13,69 @@ permissions:
 jobs:
   apply-test-push:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
+
     steps:
       - uses: actions/checkout@v4
         with:
           ref: agent/goodnotes-foundation
-      - name: Verify patch chunks
+          fetch-depth: 0
+
+      - name: Apply verified implementation patch
+        shell: bash
         run: |
-          sha256sum .github/patch/goodnotes.part-*
-          exit 1
+          echo '5b2ea2fe013c9341d6744ef4d3acde1a1c66188aebf5e4dbd2f21f1642de379c  .github/patch/goodnotes.part-05-0' | sha256sum -c -
+          echo 'fc0eeebddeaf269b1b2c7f8bfe94b0b52571aac94b5a56f491a6d3f81b05483f  .github/patch/goodnotes.part-05-1' | sha256sum -c -
+          echo 'f8d5cae69c023b040c7ce9f22cb54b6bebfacc81499d73355ae2460810020829  .github/patch/goodnotes.part-05-2' | sha256sum -c -
+          cat \
+            .github/patch/goodnotes.part-00 \
+            .github/patch/goodnotes.part-01 \
+            .github/patch/goodnotes.part-02 \
+            .github/patch/goodnotes.part-03 \
+            .github/patch/goodnotes.part-04 \
+            .github/patch/goodnotes.part-05-0 \
+            .github/patch/goodnotes.part-05-1 \
+            .github/patch/goodnotes.part-05-2 \
+            .github/patch/goodnotes.part-06 \
+            .github/patch/goodnotes.part-07 \
+            .github/patch/goodnotes.part-08 \
+            .github/patch/goodnotes.part-09 \
+            > /tmp/goodnotes-foundation.patch.gz.b64
+          echo '75da88d1221dded01d9ea25748c6f81801522a86aa635f51dcdb877fcffcba94  /tmp/goodnotes-foundation.patch.gz.b64' | sha256sum -c -
+          base64 -d /tmp/goodnotes-foundation.patch.gz.b64 > /tmp/goodnotes-foundation.patch.gz
+          echo 'a61acb1a0461a77a0cc19bfacbe1bd07fce7a176e69549d65a5cd56c4a6b5d07  /tmp/goodnotes-foundation.patch.gz' | sha256sum -c -
+          gzip -d /tmp/goodnotes-foundation.patch.gz
+          echo '5a30ae5593c802ec595a0dca952a9f368c30c345a4f617f4b3a2804c3f6886a0  /tmp/goodnotes-foundation.patch' | sha256sum -c -
+          git apply --index /tmp/goodnotes-foundation.patch
+          rm -rf .github/patch .github/workflows/apply-goodnotes-foundation.yml
+          git add -A
+          git diff --cached --check
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Build and test
+        shell: bash
+        run: gradle :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest --stacktrace
+
+      - name: Commit and push
+        shell: bash
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m 'Build Goodnotes-style note app foundation'
+          git push origin HEAD:agent/goodnotes-foundation
