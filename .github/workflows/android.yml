@@ -27,6 +27,7 @@ jobs:
         shell: bash
         run: |
           base64 -d scripts/.zoom_input_fix.b64 | gzip -d > /tmp/apply_zoom_input_fix.py
+          sed -i 's#root = Path(__file__).resolve().parents\[1\]#root = Path.cwd()#' /tmp/apply_zoom_input_fix.py
           python /tmp/apply_zoom_input_fix.py
 
       - name: Set up JDK 17
