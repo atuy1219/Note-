@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,6 +29,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -43,6 +45,7 @@ import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.SwapHoriz
@@ -54,8 +57,8 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -69,6 +72,7 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -79,15 +83,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.atuy.note.MainViewModel
+import com.atuy.note.data.EraserMode
 import com.atuy.note.data.FolderRecord
+import com.atuy.note.data.NavigationGestureMode
 import com.atuy.note.data.NoteSession
 import com.atuy.note.data.NoteSummary
 import com.atuy.note.data.PageSession
@@ -99,6 +109,7 @@ import com.atuy.note.ink.InkPageView
 fun NoteApp(
     viewModel: MainViewModel,
     onImportPdf: () -> Unit,
+    onImportImage: () -> Unit,
     onSyncDrive: () -> Unit,
 ) {
     val snackbar = remember { SnackbarHostState() }
@@ -114,7 +125,7 @@ fun NoteApp(
         if (viewModel.activeSession == null) {
             LibraryScreen(viewModel, onImportPdf, onSyncDrive, snackbar)
         } else {
-            EditorScreen(viewModel, snackbar)
+            EditorScreen(viewModel, onImportImage, snackbar)
         }
         if (viewModel.busy) {
             Box(
@@ -221,18 +232,12 @@ private fun LibraryScreen(
 }
 
 @Composable
-private fun FolderSidebar(
-    folders: List<FolderRecord>,
-    selected: String?,
-    onSelect: (String?) -> Unit,
-) {
+private fun FolderSidebar(folders: List<FolderRecord>, selected: String?, onSelect: (String?) -> Unit) {
     LazyColumn(
         modifier = Modifier.width(248.dp).fillMaxHeight().padding(8.dp),
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        item {
-            SidebarRow("All local notes", Icons.Default.Home, selected == null) { onSelect(null) }
-        }
+        item { SidebarRow("All local notes", Icons.Default.Home, selected == null) { onSelect(null) } }
         items(folders.sortedWith(compareBy<FolderRecord> { it.parentId != null }.thenBy { it.name.lowercase() })) { folder ->
             Row(
                 Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium)
@@ -250,7 +255,12 @@ private fun FolderSidebar(
 }
 
 @Composable
-private fun SidebarRow(label: String, icon: androidx.compose.ui.graphics.vector.ImageVector, selected: Boolean, onClick: () -> Unit) {
+private fun SidebarRow(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
     Row(
         Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium).clickable(onClick = onClick)
             .background(if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
@@ -306,15 +316,10 @@ private fun FolderCard(folder: FolderRecord, onClick: () -> Unit) {
 
 @Composable
 private fun NoteCard(note: NoteSummary, onClick: () -> Unit) {
-    val bitmap = remember(note.thumbnailPath, note.updatedAt) {
-        note.thumbnailPath?.let { BitmapFactory.decodeFile(it) }
-    }
+    val bitmap = remember(note.thumbnailPath, note.updatedAt) { note.thumbnailPath?.let { BitmapFactory.decodeFile(it) } }
     Card(onClick = onClick, modifier = Modifier.fillMaxWidth().height(236.dp)) {
         Column(Modifier.fillMaxSize()) {
-            Box(
-                Modifier.fillMaxWidth().weight(1f).background(Color.White),
-                contentAlignment = Alignment.Center,
-            ) {
+            Box(Modifier.fillMaxWidth().weight(1f).background(Color.White), contentAlignment = Alignment.Center) {
                 if (bitmap != null) {
                     androidx.compose.foundation.Image(
                         bitmap = bitmap.asImageBitmap(),
@@ -336,7 +341,7 @@ private fun NoteCard(note: NoteSummary, onClick: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun EditorScreen(viewModel: MainViewModel, snackbar: SnackbarHostState) {
+private fun EditorScreen(viewModel: MainViewModel, onImportImage: () -> Unit, snackbar: SnackbarHostState) {
     val active = viewModel.activeSession ?: return
     val selectedTab = viewModel.openTabs.indexOfFirst { it.id == active.id }.coerceAtLeast(0)
     Scaffold(
@@ -383,7 +388,7 @@ private fun EditorScreen(viewModel: MainViewModel, snackbar: SnackbarHostState) 
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            InkToolbar(viewModel)
+            InkToolbar(viewModel, onImportImage)
             HorizontalDivider()
             Pages(viewModel, active, Modifier.weight(1f))
         }
@@ -391,22 +396,63 @@ private fun EditorScreen(viewModel: MainViewModel, snackbar: SnackbarHostState) 
 }
 
 @Composable
-private fun InkToolbar(viewModel: MainViewModel) {
+private fun InkToolbar(viewModel: MainViewModel, onImportImage: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        FilledTonalButton(onClick = { viewModel.setTool(ToolMode.PEN) }) {
-            Icon(Icons.Default.Brush, null)
+        FilterChip(
+            selected = viewModel.toolMode == ToolMode.PEN,
+            onClick = { viewModel.setTool(ToolMode.PEN) },
+            label = { Text("Pen") },
+            leadingIcon = { Icon(Icons.Default.Brush, null, Modifier.size(18.dp)) },
+        )
+        FilterChip(
+            selected = viewModel.toolMode == ToolMode.ERASER,
+            onClick = { viewModel.setTool(ToolMode.ERASER) },
+            label = { Text("Eraser") },
+            leadingIcon = { Icon(Icons.Default.DeleteOutline, null, Modifier.size(18.dp)) },
+        )
+        FilterChip(
+            selected = viewModel.eraserMode == EraserMode.PARTIAL,
+            onClick = { viewModel.setEraserMode(EraserMode.PARTIAL) },
+            label = { Text("部分消し") },
+        )
+        FilterChip(
+            selected = viewModel.eraserMode == EraserMode.WHOLE_STROKE,
+            onClick = { viewModel.setEraserMode(EraserMode.WHOLE_STROKE) },
+            label = { Text("線全体") },
+        )
+        FilledTonalButton(onClick = onImportImage) {
+            Icon(Icons.Default.Image, null, Modifier.size(18.dp))
             Spacer(Modifier.width(6.dp))
-            Text(if (viewModel.toolMode == ToolMode.PEN) "Pen" else "Use pen")
+            Text("画像追加")
         }
-        FilledTonalButton(onClick = { viewModel.setTool(ToolMode.ERASER) }) {
-            Icon(Icons.Default.DeleteOutline, null)
-            Spacer(Modifier.width(6.dp))
-            Text(if (viewModel.toolMode == ToolMode.ERASER) "Eraser" else "Erase")
+        FilterChip(
+            selected = viewModel.toolMode == ToolMode.IMAGE,
+            onClick = { viewModel.setTool(ToolMode.IMAGE) },
+            label = { Text("画像移動") },
+        )
+        if (viewModel.activePage?.selectedImageId != null) {
+            TextButton(onClick = { viewModel.scaleSelectedImage(0.85f) }) { Text("画像−") }
+            TextButton(onClick = { viewModel.scaleSelectedImage(1.15f) }) { Text("画像＋") }
+            IconButton(onClick = viewModel::deleteSelectedImage) {
+                Icon(Icons.Default.DeleteOutline, "Delete selected image")
+            }
         }
+        VerticalDivider(Modifier.height(32.dp).width(1.dp))
+        FilterChip(
+            selected = viewModel.navigationGestureMode == NavigationGestureMode.ONE_FINGER,
+            onClick = { viewModel.setNavigationGestureMode(NavigationGestureMode.ONE_FINGER) },
+            label = { Text("指1本で移動") },
+        )
+        FilterChip(
+            selected = viewModel.navigationGestureMode == NavigationGestureMode.TWO_FINGER,
+            onClick = { viewModel.setNavigationGestureMode(NavigationGestureMode.TWO_FINGER) },
+            label = { Text("指2本で移動") },
+        )
+        VerticalDivider(Modifier.height(32.dp).width(1.dp))
         listOf(
             0xFF111111.toInt() to Color(0xFF111111),
             0xFF1565C0.toInt() to Color(0xFF1565C0),
@@ -430,27 +476,62 @@ private fun InkToolbar(viewModel: MainViewModel) {
 private fun Pages(viewModel: MainViewModel, session: NoteSession, modifier: Modifier) {
     BoxWithConstraints(modifier.fillMaxSize()) {
         val horizontalPageWidth = if (maxWidth >= 840.dp) 760.dp else maxWidth - 24.dp
+        val twoFinger = viewModel.navigationGestureMode == NavigationGestureMode.TWO_FINGER
         when (viewModel.scrollAxis) {
-            ScrollAxis.VERTICAL -> LazyColumn(
-                Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(12.dp),
-                verticalArrangement = Arrangement.spacedBy(18.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                itemsIndexed(session.pages, key = { _, page -> page.id }) { index, page ->
-                    NotePage(viewModel, session, page, index, Modifier.fillMaxWidth().widthIn(max = 900.dp))
+            ScrollAxis.VERTICAL -> {
+                val state = rememberLazyListState()
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize().twoFingerPan(twoFinger) { delta -> state.dispatchRawDelta(-delta.y) },
+                    state = state,
+                    userScrollEnabled = !twoFinger,
+                    contentPadding = PaddingValues(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(18.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    itemsIndexed(session.pages, key = { _, page -> page.id }) { index, page ->
+                        NotePage(viewModel, session, page, index, Modifier.fillMaxWidth().widthIn(max = 900.dp))
+                    }
                 }
             }
-            ScrollAxis.HORIZONTAL -> LazyRow(
-                Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(12.dp),
-                horizontalArrangement = Arrangement.spacedBy(18.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                itemsIndexed(session.pages, key = { _, page -> page.id }) { index, page ->
-                    NotePage(viewModel, session, page, index, Modifier.width(horizontalPageWidth))
+            ScrollAxis.HORIZONTAL -> {
+                val state = rememberLazyListState()
+                LazyRow(
+                    modifier = Modifier.fillMaxSize().twoFingerPan(twoFinger) { delta -> state.dispatchRawDelta(-delta.x) },
+                    state = state,
+                    userScrollEnabled = !twoFinger,
+                    contentPadding = PaddingValues(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    itemsIndexed(session.pages, key = { _, page -> page.id }) { index, page ->
+                        NotePage(viewModel, session, page, index, Modifier.width(horizontalPageWidth))
+                    }
                 }
             }
+        }
+    }
+}
+
+private fun Modifier.twoFingerPan(enabled: Boolean, onPan: (Offset) -> Unit): Modifier {
+    if (!enabled) return this
+    return pointerInput(enabled) {
+        awaitEachGesture {
+            var previousCentroid: Offset? = null
+            do {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                val touches = event.changes.filter { it.pressed && it.type == PointerType.Touch }
+                if (touches.size >= 2) {
+                    val centroid = Offset(
+                        x = touches.sumOf { it.position.x.toDouble() }.toFloat() / touches.size,
+                        y = touches.sumOf { it.position.y.toDouble() }.toFloat() / touches.size,
+                    )
+                    previousCentroid?.let { previous -> onPan(centroid - previous) }
+                    previousCentroid = centroid
+                    touches.forEach { it.consume() }
+                } else {
+                    previousCentroid = null
+                }
+            } while (event.changes.any { it.pressed })
         }
     }
 }
@@ -466,6 +547,7 @@ private fun NotePage(
     val background by produceState<Bitmap?>(initialValue = null, session.id, page.id) {
         value = viewModel.renderPdfPage(session, page, 1200)
     }
+    val redrawVersion = page.contentVersion
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Text("Page ${index + 1}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(6.dp))
@@ -477,13 +559,22 @@ private fun NotePage(
             AndroidView(
                 factory = { context -> InkPageView(context) },
                 update = { view ->
+                    redrawVersion.hashCode()
                     view.bind(
                         page = page,
                         background = background,
+                        imageBitmaps = session.imageBitmaps,
                         toolProvider = { viewModel.toolMode },
                         brushProvider = { viewModel.brushSpec },
                         onStrokeAdded = { viewModel.addStroke(page, it) },
+                        onEraseStart = { viewModel.beginErase(page) },
                         onErase = { x, y, radius -> viewModel.eraseAt(page, x, y, radius) },
+                        onEraseEnd = { viewModel.endErase(page) },
+                        onImageSelected = { viewModel.selectImage(page, it) },
+                        onImageTransformStart = { viewModel.beginImageTransform(page, it) },
+                        onImageMove = { id, x, y -> viewModel.moveImage(page, id, x, y) },
+                        onImageTransformEnd = { viewModel.endImageTransform(page) },
+                        onImageTransformCancel = { viewModel.cancelImageTransform(page) },
                         onActivated = { viewModel.activatePage(index) },
                     )
                 },
