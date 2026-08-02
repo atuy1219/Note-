@@ -21,6 +21,12 @@ jobs:
           ref: agent/note-app
           fetch-depth: 0
 
+      - name: Merge current main
+        shell: bash
+        run: |
+          git fetch origin main
+          git merge --no-edit origin/main
+
       - name: Apply ink handoff fix
         shell: bash
         run: |
