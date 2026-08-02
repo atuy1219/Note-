@@ -679,7 +679,6 @@ private fun NotePage(
     val background by produceState<Bitmap?>(initialValue = null, session.id, page.id) {
         value = viewModel.renderPdfPage(session, page, 1200)
     }
-    val redrawVersion = page.contentVersion
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
         Text("Page ${index + 1}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(6.dp))
@@ -691,9 +690,9 @@ private fun NotePage(
             AndroidView(
                 factory = { context -> InkPageView(context) },
                 update = { view ->
-                    redrawVersion.hashCode()
                     view.bind(
                         page = page,
+                        contentVersion = page.contentVersion,
                         background = background,
                         imageBitmaps = session.imageBitmaps,
                         toolProvider = { viewModel.toolMode },

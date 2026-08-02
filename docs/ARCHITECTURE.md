@@ -9,7 +9,9 @@
 
 ## Rendering
 
-Finger gestures are left to Compose's page scrollers. Stylus and eraser events are consumed by `InkPageView`. Wet ink is rendered by AndroidX Ink's `InProgressStrokesView`; completed strokes are handed to `DryInkView`, which redraws them with `CanvasStrokeRenderer` over the optional PDF bitmap.
+`InkViewport` is the single owner of page fit, zoom, and pan. `DryInkView` applies its matrix once to the canvas and draws the optional PDF bitmap, page images, and completed Ink strokes in that same world coordinate system. The same complete transform is also supplied to `CanvasStrokeRenderer` for screen-space rendering quality; that argument describes the canvas transform but does not apply it. Stylus input remains as the raw view-space `MotionEvent`; the inverse viewport matrix is supplied to `InProgressStrokesView.startStroke`, as required by AndroidX Ink, so wet and dry coordinates do not diverge after zooming.
+
+Finger gestures are consumed by `InkPageView` for pinch zoom and viewport pan, or forwarded as page-list navigation deltas at 1x. Completed strokes are added to the page model, the dry layer is invalidated, and their wet copies are removed within the same UI run loop. `PageSession.contentVersion` is observed directly by the `AndroidView` update block so the first stroke in a new note also schedules a dry redraw without requiring a tool change.
 
 ## Persistence
 
