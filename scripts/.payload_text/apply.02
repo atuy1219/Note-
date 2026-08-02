@@ -1,0 +1,46 @@
+      Spacer(Modifier.width(6.dp))
+            Text("画像追加")
+        }''',
+    '''        if (viewModel.activePage?.selectedStrokeIds?.isNotEmpty() == true) {
+            TextButton(onClick = { viewModel.scaleSelectedStrokes(0.85f) }) { Text("選択−") }
+            TextButton(onClick = { viewModel.scaleSelectedStrokes(1.15f) }) { Text("選択＋") }
+            IconButton(onClick = viewModel::deleteSelectedStrokes) {
+                Icon(Icons.Default.DeleteOutline, "Delete selected strokes")
+            }
+        }
+        FilledTonalButton(onClick = onImportImage) {
+            Icon(Icons.Default.Image, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text("画像追加")
+        }''',
+)
+replace_once(ui,
+    '''                        onEraseStart = { viewModel.beginErase(page) },
+                        onErase = { x, y, radius -> viewModel.eraseAt(page, x, y, radius) },
+                        onEraseEnd = { viewModel.endErase(page) },
+                        onImageSelected = { viewModel.selectImage(page, it) },''',
+    '''                        onEraseStart = { viewModel.beginErase(page) },
+                        onErase = { x, y, radius -> viewModel.eraseAt(page, x, y, radius) },
+                        onEraseEnd = { viewModel.endErase(page) },
+                        onLassoFinished = { viewModel.selectWithLasso(page, it) },
+                        onSelectedTransformStart = { viewModel.beginSelectedStrokeTransform(page) },
+                        onSelectedMove = { dx, dy -> viewModel.moveSelectedStrokes(page, dx, dy) },
+                        onSelectedTransformEnd = { viewModel.endSelectedStrokeTransform(page) },
+                        onSelectedTransformCancel = { viewModel.cancelSelectedStrokeTransform(page) },
+                        onImageSelected = { viewModel.selectImage(page, it) },''',
+)
+
+arch = ROOT / 'docs/ARCHITECTURE.md'
+architecture = arch.read_text()
+appendix = '''
+
+## `.atnote` format v3
+
+Version 3 stores each completed stroke as the gzip-compressed Protocol Buffers payload produced by `androidx.ink.storage.StrokeInputBatchSerialization`. The JSON manifest contains only stroke IDs, brush metadata, and an `ink/strokes/<id>.bin` entry reference. Version 2 Base64-in-JSON notes remain readable and migrate on the next save.
+
+Lasso input uses the AndroidX Ink dashed-line stock brush. Its input batch is closed with `MeshCreation.createClosedShape`, then intersected with each stroke mesh. Selected strokes can be moved, scaled, deleted, undone, and redone; transformations rebuild editable Ink input batches rather than rasterizing them.
+'''
+if '## `.atnote` format v3' not in architecture:
+    arch.write_text(architecture.rstrip() + appendix)
+
+print('Applied Ink Storage v3 and lasso selection changes.')
