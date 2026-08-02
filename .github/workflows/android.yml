@@ -20,6 +20,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Upload source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: note-source-snapshot
+          path: |
+            app
+            docs
+            README.md
+            build.gradle.kts
+            settings.gradle.kts
+            gradle.properties
+          if-no-files-found: error
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
