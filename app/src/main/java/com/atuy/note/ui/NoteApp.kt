@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -65,6 +66,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -96,8 +98,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.atuy.note.MainViewModel
+import com.atuy.note.data.BrushKind
+import com.atuy.note.data.CustomBrushSpec
 import com.atuy.note.data.EraserMode
 import com.atuy.note.data.FolderRecord
+import com.atuy.note.data.LassoCoverageMode
 import com.atuy.note.data.NavigationGestureMode
 import com.atuy.note.data.NoteSession
 import com.atuy.note.data.NoteSummary
@@ -398,21 +403,55 @@ private fun EditorScreen(viewModel: MainViewModel, onImportImage: () -> Unit, sn
 
 @Composable
 private fun InkToolbar(viewModel: MainViewModel, onImportImage: () -> Unit) {
+    var showCustomEditor by remember { mutableStateOf(false) }
+    val normalColors = listOf(
+        0xFF111111.toInt() to Color(0xFF111111),
+        0xFF1565C0.toInt() to Color(0xFF1565C0),
+        0xFFC62828.toInt() to Color(0xFFC62828),
+        0xFF2E7D32.toInt() to Color(0xFF2E7D32),
+    )
+    val highlighterColors = listOf(
+        0x66FFF176 to Color(0x66FFF176),
+        0x6681C784 to Color(0x6681C784),
+        0x6664B5F6 to Color(0x6664B5F6),
+        0x66F48FB1 to Color(0x66F48FB1),
+    )
+    val activeColors = if (viewModel.brushSpec.kind == BrushKind.HIGHLIGHTER) highlighterColors else normalColors
+    val activeSizes = if (viewModel.brushSpec.kind == BrushKind.HIGHLIGHTER) listOf(12f, 18f, 26f) else listOf(3.2f, 5.5f, 9f)
+
     Row(
         Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 10.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         FilterChip(
-            selected = viewModel.toolMode == ToolMode.PEN,
-            onClick = { viewModel.setTool(ToolMode.PEN) },
-            label = { Text("Pen") },
+            selected = viewModel.toolMode == ToolMode.PEN && viewModel.brushSpec.kind == BrushKind.PRESSURE_PEN,
+            onClick = { viewModel.setBrushKind(BrushKind.PRESSURE_PEN) },
+            label = { Text("ペン") },
             leadingIcon = { Icon(Icons.Default.Brush, null, Modifier.size(18.dp)) },
+        )
+        FilterChip(
+            selected = viewModel.toolMode == ToolMode.PEN && viewModel.brushSpec.kind == BrushKind.MARKER,
+            onClick = { viewModel.setBrushKind(BrushKind.MARKER) },
+            label = { Text("マーカー") },
+        )
+        FilterChip(
+            selected = viewModel.toolMode == ToolMode.PEN && viewModel.brushSpec.kind == BrushKind.HIGHLIGHTER,
+            onClick = { viewModel.setBrushKind(BrushKind.HIGHLIGHTER) },
+            label = { Text("蛍光ペン") },
+        )
+        FilterChip(
+            selected = viewModel.toolMode == ToolMode.PEN && viewModel.brushSpec.kind == BrushKind.CUSTOM,
+            onClick = {
+                viewModel.setBrushKind(BrushKind.CUSTOM)
+                showCustomEditor = true
+            },
+            label = { Text("カスタム") },
         )
         FilterChip(
             selected = viewModel.toolMode == ToolMode.ERASER,
             onClick = { viewModel.setTool(ToolMode.ERASER) },
-            label = { Text("Eraser") },
+            label = { Text("消しゴム") },
             leadingIcon = { Icon(Icons.Default.DeleteOutline, null, Modifier.size(18.dp)) },
         )
         FilterChip(
@@ -421,23 +460,53 @@ private fun InkToolbar(viewModel: MainViewModel, onImportImage: () -> Unit) {
             label = { Text("投げ縄") },
             leadingIcon = { Icon(Icons.Default.Gesture, null, Modifier.size(18.dp)) },
         )
-        FilterChip(
-            selected = viewModel.eraserMode == EraserMode.PARTIAL,
-            onClick = { viewModel.setEraserMode(EraserMode.PARTIAL) },
-            label = { Text("部分消し") },
-        )
-        FilterChip(
-            selected = viewModel.eraserMode == EraserMode.WHOLE_STROKE,
-            onClick = { viewModel.setEraserMode(EraserMode.WHOLE_STROKE) },
-            label = { Text("線全体") },
-        )
+
+        if (viewModel.toolMode == ToolMode.ERASER) {
+            FilterChip(
+                selected = viewModel.eraserMode == EraserMode.PARTIAL,
+                onClick = { viewModel.setEraserMode(EraserMode.PARTIAL) },
+                label = { Text("部分消し") },
+            )
+            FilterChip(
+                selected = viewModel.eraserMode == EraserMode.WHOLE_STROKE,
+                onClick = { viewModel.setEraserMode(EraserMode.WHOLE_STROKE) },
+                label = { Text("線全体") },
+            )
+        }
+
+        if (viewModel.toolMode == ToolMode.LASSO) {
+            VerticalDivider(Modifier.height(32.dp).width(1.dp))
+            Text("選択率", style = MaterialTheme.typography.labelMedium)
+            listOf(
+                LassoCoverageMode.INTERSECTS to "交差",
+                LassoCoverageMode.QUARTER to "25%",
+                LassoCoverageMode.HALF to "50%",
+                LassoCoverageMode.ALMOST_ALL to "90%",
+            ).forEach { (mode, label) ->
+                FilterChip(
+                    selected = viewModel.lassoCoverageMode == mode,
+                    onClick = { viewModel.setLassoCoverageMode(mode) },
+                    label = { Text(label) },
+                )
+            }
+        }
+
         if (viewModel.activePage?.selectedStrokeIds?.isNotEmpty() == true) {
+            VerticalDivider(Modifier.height(32.dp).width(1.dp))
+            FilledTonalButton(onClick = viewModel::applyCurrentBrushToSelected) { Text("現在のブラシを適用") }
             TextButton(onClick = { viewModel.scaleSelectedStrokes(0.85f) }) { Text("選択−") }
             TextButton(onClick = { viewModel.scaleSelectedStrokes(1.15f) }) { Text("選択＋") }
+            normalColors.forEach { (argb, color) ->
+                ColorSwatch(color) { viewModel.updateSelectedBrush(colorArgb = argb) }
+            }
+            listOf(3.2f, 5.5f, 9f, 18f).forEach { size ->
+                TextButton(onClick = { viewModel.updateSelectedBrush(size = size) }) { Text("${size}pt") }
+            }
             IconButton(onClick = viewModel::deleteSelectedStrokes) {
                 Icon(Icons.Default.DeleteOutline, "Delete selected strokes")
             }
         }
+
         FilledTonalButton(onClick = onImportImage) {
             Icon(Icons.Default.Image, null, Modifier.size(18.dp))
             Spacer(Modifier.width(6.dp))
@@ -455,6 +524,7 @@ private fun InkToolbar(viewModel: MainViewModel, onImportImage: () -> Unit) {
                 Icon(Icons.Default.DeleteOutline, "Delete selected image")
             }
         }
+
         VerticalDivider(Modifier.height(32.dp).width(1.dp))
         FilterChip(
             selected = viewModel.navigationGestureMode == NavigationGestureMode.ONE_FINGER,
@@ -466,23 +536,89 @@ private fun InkToolbar(viewModel: MainViewModel, onImportImage: () -> Unit) {
             onClick = { viewModel.setNavigationGestureMode(NavigationGestureMode.TWO_FINGER) },
             label = { Text("指2本で移動") },
         )
+
         VerticalDivider(Modifier.height(32.dp).width(1.dp))
-        listOf(
-            0xFF111111.toInt() to Color(0xFF111111),
-            0xFF1565C0.toInt() to Color(0xFF1565C0),
-            0xFFC62828.toInt() to Color(0xFFC62828),
-            0xFF2E7D32.toInt() to Color(0xFF2E7D32),
-        ).forEach { (argb, color) ->
-            Box(
-                Modifier.size(34.dp).clip(CircleShape).background(color)
-                    .clickable { viewModel.updateBrush(colorArgb = argb) },
-            )
+        activeColors.forEach { (argb, color) ->
+            ColorSwatch(color) { viewModel.updateBrush(colorArgb = argb) }
         }
-        listOf(3.2f, 5.5f, 9f).forEach { size ->
+        activeSizes.forEach { size ->
             TextButton(onClick = { viewModel.updateBrush(size = size) }) {
                 Text("${size}pt", fontWeight = if (viewModel.brushSpec.size == size) FontWeight.Bold else FontWeight.Normal)
             }
         }
+    }
+
+    if (showCustomEditor) {
+        CustomBrushDialog(
+            initial = viewModel.brushSpec.custom ?: CustomBrushSpec(),
+            onDismiss = { showCustomEditor = false },
+            onApply = {
+                showCustomEditor = false
+                viewModel.updateCustomBrush(it)
+            },
+        )
+    }
+}
+
+@Composable
+private fun ColorSwatch(color: Color, onClick: () -> Unit) {
+    Box(
+        Modifier.size(34.dp).clip(CircleShape).background(color).clickable(onClick = onClick),
+    )
+}
+
+@Composable
+private fun CustomBrushDialog(
+    initial: CustomBrushSpec,
+    onDismiss: () -> Unit,
+    onApply: (CustomBrushSpec) -> Unit,
+) {
+    var value by remember(initial) { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("カスタムブラシ") },
+        text = {
+            Column(
+                Modifier.fillMaxWidth().verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                BrushSlider("横幅", value.scaleX, 0.15f..2.5f) { value = value.copy(scaleX = it) }
+                BrushSlider("縦幅", value.scaleY, 0.15f..2.5f) { value = value.copy(scaleY = it) }
+                BrushSlider("角の丸さ", value.cornerRounding, 0f..1f) { value = value.copy(cornerRounding = it) }
+                BrushSlider("傾斜", value.slantDegrees, -75f..75f, "°") { value = value.copy(slantDegrees = it) }
+                BrushSlider("回転", value.rotationDegrees, -180f..180f, "°") { value = value.copy(rotationDegrees = it) }
+                BrushSlider("平滑化", value.smoothingWindowMillis.toFloat(), 0f..80f, "ms") {
+                    value = value.copy(smoothingWindowMillis = it.toLong())
+                }
+                BrushSlider("補間周波数", value.upsamplingFrequencyHz.toFloat(), 30f..240f, "Hz") {
+                    value = value.copy(upsamplingFrequencyHz = it.toInt())
+                }
+                Text(
+                    "筆圧特性はPressure Penを継承し、ここではペン先形状と入力平滑化を変更します。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = { Button(onClick = { onApply(value) }) { Text("適用") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("キャンセル") } },
+    )
+}
+
+@Composable
+private fun BrushSlider(
+    label: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    suffix: String = "",
+    onValueChange: (Float) -> Unit,
+) {
+    Column {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(label, style = MaterialTheme.typography.labelMedium)
+            Text("${"%.1f".format(value)}$suffix", style = MaterialTheme.typography.labelMedium)
+        }
+        Slider(value = value.coerceIn(range.start, range.endInclusive), onValueChange = onValueChange, valueRange = range)
     }
 }
 

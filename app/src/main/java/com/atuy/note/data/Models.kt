@@ -8,6 +8,8 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.ink.brush.Brush
+import androidx.ink.brush.BrushFamily
+import androidx.ink.brush.BrushTip
 import androidx.ink.brush.InputToolType
 import androidx.ink.brush.StockBrushes
 import androidx.ink.geometry.ImmutableAffineTransform
@@ -15,6 +17,7 @@ import androidx.ink.geometry.Intersection.intersects
 import androidx.ink.strokes.createClosedShape
 import androidx.ink.strokes.MutableStrokeInputBatch
 import androidx.ink.strokes.Stroke
+import androidx.ink.strokes.StrokeInput
 import androidx.ink.strokes.StrokeInputBatch
 import androidx.ink.storage.StrokeInputBatchSerialization
 import kotlinx.serialization.EncodeDefault
@@ -25,6 +28,8 @@ import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.PI
+import kotlin.math.roundToLong
 import kotlin.math.sqrt
 
 const val NOTE_MIME_TYPE = "application/vnd.atuy.note+zip"
@@ -69,7 +74,7 @@ data class NoteSummary(
 
 @Serializable
 data class NoteDocument(
-    val formatVersion: Int = 3,
+    val formatVersion: Int = 4,
     val id: String = UUID.randomUUID().toString(),
     val title: String,
     val folderId: String? = null,
@@ -116,7 +121,26 @@ data class StoredStroke(
 data class InkSample(
     val x: Float,
     val y: Float,
-    val pressure: Float = 1f,
+    val elapsedTimeMillis: Long = 0L,
+    val strokeUnitLengthCm: Float? = null,
+    val pressure: Float? = 1f,
+    val tiltRadians: Float? = null,
+    val orientationRadians: Float? = null,
+    val toolType: StoredInputToolType = StoredInputToolType.STYLUS,
+)
+
+@Serializable
+enum class StoredInputToolType { STYLUS, TOUCH, MOUSE }
+
+@Serializable
+data class CustomBrushSpec(
+    val scaleX: Float = 1f,
+    val scaleY: Float = 0.48f,
+    val cornerRounding: Float = 0.72f,
+    val slantDegrees: Float = 0f,
+    val rotationDegrees: Float = 0f,
+    val smoothingWindowMillis: Long = 18L,
+    val upsamplingFrequencyHz: Int = 120,
 )
 
 @Serializable
@@ -125,15 +149,19 @@ data class BrushSpec(
     val colorArgb: Int = 0xFF111111.toInt(),
     val size: Float = 5.5f,
     val epsilon: Float = 0.1f,
+    val custom: CustomBrushSpec? = null,
 )
 
 @Serializable
-enum class BrushKind { PRESSURE_PEN, MARKER }
+enum class BrushKind { PRESSURE_PEN, MARKER, HIGHLIGHTER, CUSTOM }
 
 enum class ToolMode { PEN, ERASER, LASSO, IMAGE }
 enum class ScrollAxis { VERTICAL, HORIZONTAL }
 enum class NavigationGestureMode { ONE_FINGER, TWO_FINGER }
 enum class EraserMode { WHOLE_STROKE, PARTIAL }
+enum class LassoCoverageMode(val minimumCoverage: Float) {
+    INTERSECTS(0f), QUARTER(0.25f), HALF(0.5f), ALMOST_ALL(0.9f)
+}
 
 data class RuntimeStroke(
     val stored: StoredStroke,
@@ -205,7 +233,7 @@ class PageSession(
         return true
     }
 
-    fun selectWithLasso(lassoInputs: StrokeInputBatch): Int {
+    fun selectWithLasso(lassoInputs: StrokeInputBatch, mode: LassoCoverageMode): Int {
         if (lassoInputs.size < 3) {
             clearStrokeSelection()
             return 0
@@ -217,7 +245,11 @@ class PageSession(
         }
         val selected = strokes.filter { runtime ->
             runCatching {
-                runtime.stroke.shape.intersects(lassoShape, IDENTITY_TRANSFORM, IDENTITY_TRANSFORM)
+                if (mode == LassoCoverageMode.INTERSECTS) {
+                    runtime.stroke.shape.intersects(lassoShape, IDENTITY_TRANSFORM, IDENTITY_TRANSFORM)
+                } else {
+                    runtime.stroke.shape.computeCoverage(lassoShape, IDENTITY_TRANSFORM) >= mode.minimumCoverage
+                }
             }.getOrDefault(false)
         }.map { it.stored.id }
         selectedStrokeIds.clear()
@@ -240,11 +272,12 @@ class PageSession(
         var minY = Float.POSITIVE_INFINITY
         var maxX = Float.NEGATIVE_INFINITY
         var maxY = Float.NEGATIVE_INFINITY
-        selected.asSequence().flatMap { it.samples.asSequence() }.forEach { sample ->
-            minX = min(minX, sample.x)
-            minY = min(minY, sample.y)
-            maxX = max(maxX, sample.x)
-            maxY = max(maxY, sample.y)
+        selected.forEach { runtime ->
+            val box = runtime.stroke.shape.computeBoundingBox() ?: return@forEach
+            minX = min(minX, box.xMin)
+            minY = min(minY, box.yMin)
+            maxX = max(maxX, box.xMax)
+            maxY = max(maxY, box.yMax)
         }
         return if (minX.isFinite()) floatArrayOf(minX, minY, maxX, maxY) else null
     }
@@ -299,6 +332,37 @@ class PageSession(
             } else runtime
         }
         if (sameStrokeSequence(before, after)) return false
+        replaceAllStrokes(after, preserveSelection = true)
+        undoStack.addLast(InkOperation.ReplaceStrokes(before, after))
+        redoStack.clear()
+        return true
+    }
+
+    fun restyleSelectedStrokes(
+        colorArgb: Int? = null,
+        size: Float? = null,
+        kind: BrushKind? = null,
+        custom: CustomBrushSpec? = null,
+    ): Boolean {
+        if (selectedStrokeIds.isEmpty()) return false
+        val selectedIds = selectedStrokeIds.toSet()
+        val before = strokes.toList()
+        val after = before.map { runtime ->
+            if (runtime.stored.id !in selectedIds) return@map runtime
+            val previous = runtime.stored.brush
+            val nextKind = kind ?: previous.kind
+            val next = previous.copy(
+                kind = nextKind,
+                colorArgb = colorArgb ?: previous.colorArgb,
+                size = size?.coerceIn(0.5f, 96f) ?: previous.size,
+                custom = when (nextKind) {
+                    BrushKind.CUSTOM -> custom ?: previous.custom ?: CustomBrushSpec()
+                    else -> null
+                },
+            )
+            runtime.withBrush(next)
+        }
+        if (sameStrokeSequence(before, after) && before.map { it.stored.brush } == after.map { it.stored.brush }) return false
         replaceAllStrokes(after, preserveSelection = true)
         undoStack.addLast(InkOperation.ReplaceStrokes(before, after))
         redoStack.clear()
@@ -523,7 +587,7 @@ class NoteSession(
         val now = System.currentTimeMillis()
         val revisionValue = if (nextRevision) revision + 1 else revision
         return NoteDocument(
-            formatVersion = 3,
+            formatVersion = 4,
             id = id,
             title = title,
             folderId = folderId,
@@ -544,8 +608,34 @@ fun BrushSpec.toBrush(): Brush {
     val family = when (kind) {
         BrushKind.PRESSURE_PEN -> StockBrushes.pressurePen()
         BrushKind.MARKER -> StockBrushes.marker()
+        BrushKind.HIGHLIGHTER -> StockBrushes.highlighter()
+        BrushKind.CUSTOM -> buildCustomBrushFamily(custom ?: CustomBrushSpec())
     }
-    return Brush.createWithColorIntArgb(family, colorArgb, size, epsilon)
+    val resolvedColor = if (kind == BrushKind.HIGHLIGHTER && (colorArgb ushr 24) == 0xFF) {
+        (0x66 shl 24) or (colorArgb and 0x00FFFFFF)
+    } else colorArgb
+    return Brush.createWithColorIntArgb(family, resolvedColor, size, epsilon)
+}
+
+private fun buildCustomBrushFamily(spec: CustomBrushSpec): BrushFamily {
+    val base = StockBrushes.pressurePen()
+    val baseCoat = base.coats.first()
+    val customTip = baseCoat.tip.copy(
+        scaleX = spec.scaleX.coerceIn(0.08f, 4f),
+        scaleY = spec.scaleY.coerceIn(0.08f, 4f),
+        cornerRounding = spec.cornerRounding.coerceIn(0f, 1f),
+        slantDegrees = spec.slantDegrees.coerceIn(-90f, 90f),
+        rotationDegrees = spec.rotationDegrees,
+    )
+    val customCoat = baseCoat.copy(tip = customTip)
+    return base.copy(
+        coats = listOf(customCoat),
+        inputModel = BrushFamily.InputModel.SlidingWindowModel(
+            spec.smoothingWindowMillis.coerceIn(0L, 100L),
+            spec.upsamplingFrequencyHz.coerceIn(30, 360),
+        ),
+        developerComment = "Note custom brush",
+    )
 }
 
 fun Stroke.toRuntimeStroke(spec: BrushSpec): RuntimeStroke {
@@ -577,19 +667,28 @@ private fun RuntimeStroke.runtimeWithSamples(rawSamples: List<InkSample>): Runti
     val samples = sanitizeSamples(rawSamples)
     check(samples.size >= 2) { "Not enough stroke samples" }
     val batch = MutableStrokeInputBatch()
-    samples.forEachIndexed { index, sample ->
+    samples.forEach { sample ->
         batch.add(
-            type = InputToolType.STYLUS,
+            type = sample.toolType.toInputToolType(),
             x = sample.x,
             y = sample.y,
-            elapsedTimeMillis = index * 8L,
-            pressure = sample.pressure.coerceIn(0f, 1f),
+            elapsedTimeMillis = sample.elapsedTimeMillis,
+            strokeUnitLengthCm = sample.strokeUnitLengthCm ?: StrokeInput.NO_STROKE_UNIT_LENGTH,
+            pressure = sample.pressure ?: StrokeInput.NO_PRESSURE,
+            tiltRadians = sample.tiltRadians ?: StrokeInput.NO_TILT,
+            orientationRadians = sample.orientationRadians ?: StrokeInput.NO_ORIENTATION,
         )
     }
+    batch.setNoiseSeed(stroke.inputs.getNoiseSeed())
     val id = UUID.randomUUID().toString()
     val metadata = StoredStroke(id = id, brush = stored.brush, inkEntry = "ink/strokes/$id.bin")
     RuntimeStroke(metadata, Stroke(stored.brush.toBrush(), batch), samples)
 }.getOrNull()
+
+private fun RuntimeStroke.withBrush(spec: BrushSpec): RuntimeStroke {
+    val metadata = stored.copy(brush = spec)
+    return RuntimeStroke(metadata, Stroke(spec.toBrush(), stroke.inputs), samples)
+}
 
 private fun RuntimeStroke.transformed(
     dx: Float = 0f,
@@ -603,23 +702,18 @@ private fun RuntimeStroke.transformed(
         val input = stroke.inputs[index]
         val transformedX = centerX + (input.x - centerX) * scale + dx
         val transformedY = centerY + (input.y - centerY) * scale + dy
-        if (input.hasPressure) {
-            batch.add(
-                type = input.toolType,
-                x = transformedX,
-                y = transformedY,
-                elapsedTimeMillis = input.elapsedTimeMillis,
-                pressure = input.pressure,
-            )
-        } else {
-            batch.add(
-                type = input.toolType,
-                x = transformedX,
-                y = transformedY,
-                elapsedTimeMillis = input.elapsedTimeMillis,
-            )
-        }
+        batch.add(
+            type = input.toolType,
+            x = transformedX,
+            y = transformedY,
+            elapsedTimeMillis = input.elapsedTimeMillis,
+            strokeUnitLengthCm = input.strokeUnitLengthCm,
+            pressure = input.pressure,
+            tiltRadians = input.tiltRadians,
+            orientationRadians = input.orientationRadians,
+        )
     }
+    batch.setNoiseSeed(stroke.inputs.getNoiseSeed())
     val nextStroke = Stroke(stored.brush.toBrush(), batch)
     return RuntimeStroke(stored, nextStroke)
 }
@@ -629,8 +723,25 @@ fun StrokeInputBatch.toInkSamples(): List<InkSample> = List(size) { index ->
     InkSample(
         x = input.x,
         y = input.y,
-        pressure = if (input.hasPressure) input.pressure else 1f,
+        elapsedTimeMillis = input.elapsedTimeMillis,
+        strokeUnitLengthCm = input.strokeUnitLengthCm.takeUnless { it == StrokeInput.NO_STROKE_UNIT_LENGTH },
+        pressure = input.pressure.takeUnless { it == StrokeInput.NO_PRESSURE },
+        tiltRadians = input.tiltRadians.takeUnless { it == StrokeInput.NO_TILT },
+        orientationRadians = input.orientationRadians.takeUnless { it == StrokeInput.NO_ORIENTATION },
+        toolType = input.toolType.toStoredInputToolType(),
     )
+}
+
+private fun InputToolType.toStoredInputToolType(): StoredInputToolType = when (this) {
+    InputToolType.MOUSE -> StoredInputToolType.MOUSE
+    InputToolType.TOUCH -> StoredInputToolType.TOUCH
+    else -> StoredInputToolType.STYLUS
+}
+
+private fun StoredInputToolType.toInputToolType(): InputToolType = when (this) {
+    StoredInputToolType.MOUSE -> InputToolType.MOUSE
+    StoredInputToolType.TOUCH -> InputToolType.TOUCH
+    StoredInputToolType.STYLUS -> InputToolType.STYLUS
 }
 
 private fun sanitizeSamples(samples: List<InkSample>): List<InkSample> {
@@ -737,8 +848,26 @@ private fun segmentCircleIntersections(
 private fun interpolate(a: InkSample, b: InkSample, t: Float) = InkSample(
     x = a.x + (b.x - a.x) * t,
     y = a.y + (b.y - a.y) * t,
-    pressure = a.pressure + (b.pressure - a.pressure) * t,
+    elapsedTimeMillis = a.elapsedTimeMillis + ((b.elapsedTimeMillis - a.elapsedTimeMillis) * t).roundToLong(),
+    strokeUnitLengthCm = a.strokeUnitLengthCm ?: b.strokeUnitLengthCm,
+    pressure = interpolateOptional(a.pressure, b.pressure, t),
+    tiltRadians = interpolateOptional(a.tiltRadians, b.tiltRadians, t),
+    orientationRadians = interpolateOrientation(a.orientationRadians, b.orientationRadians, t),
+    toolType = a.toolType,
 )
+
+private fun interpolateOptional(a: Float?, b: Float?, t: Float): Float? =
+    if (a != null && b != null) a + (b - a) * t else a ?: b
+
+private fun interpolateOrientation(a: Float?, b: Float?, t: Float): Float? {
+    if (a == null || b == null) return a ?: b
+    val turn = (2.0 * PI).toFloat()
+    var delta = (b - a) % turn
+    val halfTurn = PI.toFloat()
+    if (delta > halfTurn) delta -= turn
+    if (delta < -halfTurn) delta += turn
+    return ((a + delta * t) % turn + turn) % turn
+}
 
 private fun squaredDistancePointToSegment(
     px: Float,

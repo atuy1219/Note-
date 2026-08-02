@@ -12,9 +12,12 @@ AndroidX Inkを土台にした、Androidタブレット／スマートフォン�
 - PDFインポートと各ページへの追記
 - 任意階層のフォルダー
 - ノート／PDF先頭ページのサムネイル
-- Undo／Redo、オブジェクト消しゴム、自動保存
+- Undo／Redo、線全体／部分消しゴム、自動保存
 - Lenovo系ペンのボタン／ダブルタップによる消しゴム切り替え
 - Google Drive `appDataFolder`を使った端末間同期
+- 投げ縄選択（交差／25%／50%／90%包含率）、メッシュ基準の選択枠
+- Pressure Pen、Marker、Highlighter、パラメーター式カスタムブラシ
+- 選択筆跡の移動・拡縮・削除・色／太さ／ブラシ変更
 - 編集可能な独自形式 `.atnote`
 
 ## `.atnote`形式
@@ -22,11 +25,13 @@ AndroidX Inkを土台にした、Androidタブレット／スマートフォン�
 `.atnote`はZIPコンテナーです。
 
 ```text
-manifest.json             ノート、ページ、ブラシ、AndroidX Ink入力列
+manifest.json             ノート、ページ、ブラシ、Inkエントリー参照
 background/source.pdf     PDFから作成したノートのみ。原本PDF
+ink/strokes/<id>.bin      AndroidX Ink Storageの公式圧縮入力列
+images/<id>.png           ページへ配置した編集可能な画像
 ```
 
-ストロークはAndroidX Inkの`StrokeInputBatch`をgzip圧縮バイナリとして保存し、ブラシ設定と当たり判定用のサンプル列も保持します。そのため、Drive同期後もPDF画像ではなく、ペン色・太さ・消去・Undo対象として再編集できます。
+ストロークはAndroidX Inkの`StrokeInputBatch`をInk Storageのgzip圧縮Protocol Buffersとして直接保存し、manifestにはブラシ設定と参照先を保持します。そのため、Drive同期後もPDF画像ではなく、ペン色・太さ・消去・Undo対象として再編集できます。
 
 ## Google Drive同期
 
@@ -79,7 +84,8 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ## 現在の制約
 
-- 消しゴムは線全体を削除する方式です。
+- AndroidX Inkの公式メッシュ部分消しは永続化制約があるため、部分消しは入力列を分割して再生成します。
+
 - Drive同期は明示的な同期ボタンで開始します。
 - 同じノートを複数端末で同時編集した場合は自動マージせず、競合コピーを残します。
 - PDFのテキスト編集ではなく、原本PDFの上に編集可能なInkストロークを保持します。

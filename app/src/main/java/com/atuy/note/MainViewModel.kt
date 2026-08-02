@@ -12,9 +12,12 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.ink.strokes.Stroke
+import com.atuy.note.data.BrushKind
 import com.atuy.note.data.BrushSpec
+import com.atuy.note.data.CustomBrushSpec
 import com.atuy.note.data.EraserMode
 import com.atuy.note.data.FolderRecord
+import com.atuy.note.data.LassoCoverageMode
 import com.atuy.note.data.LibraryIndex
 import com.atuy.note.data.NavigationGestureMode
 import com.atuy.note.data.NoteRepository
@@ -61,6 +64,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var eraserModeState by mutableStateOf(enumPreference("eraser_mode", EraserMode.PARTIAL))
     val eraserMode: EraserMode
         get() = eraserModeState
+
+    private var lassoCoverageModeState by mutableStateOf(
+        enumPreference("lasso_coverage", LassoCoverageMode.HALF),
+    )
+    val lassoCoverageMode: LassoCoverageMode
+        get() = lassoCoverageModeState
 
     var busy by mutableStateOf(false)
         private set
@@ -185,7 +194,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun updateBrush(colorArgb: Int = brushSpec.colorArgb, size: Float = brushSpec.size) {
-        brushSpec = brushSpec.copy(colorArgb = colorArgb, size = size)
+        val resolvedColor = if (brushSpec.kind == BrushKind.HIGHLIGHTER) {
+            (0x66 shl 24) or (colorArgb and 0x00FFFFFF)
+        } else {
+            (0xFF shl 24) or (colorArgb and 0x00FFFFFF)
+        }
+        brushSpec = brushSpec.copy(colorArgb = resolvedColor, size = size.coerceIn(0.5f, 96f))
+        setTool(ToolMode.PEN)
+    }
+
+    fun setBrushKind(kind: BrushKind) {
+        brushSpec = when (kind) {
+            BrushKind.PRESSURE_PEN -> brushSpec.copy(
+                kind = kind,
+                colorArgb = (0xFF shl 24) or (brushSpec.colorArgb and 0x00FFFFFF),
+                size = brushSpec.size.coerceIn(1.5f, 18f),
+                custom = null,
+            )
+            BrushKind.MARKER -> brushSpec.copy(
+                kind = kind,
+                colorArgb = (0xFF shl 24) or (brushSpec.colorArgb and 0x00FFFFFF),
+                size = brushSpec.size.coerceAtLeast(5f),
+                custom = null,
+            )
+            BrushKind.HIGHLIGHTER -> brushSpec.copy(
+                kind = kind,
+                colorArgb = (0x66 shl 24) or (if ((brushSpec.colorArgb and 0x00FFFFFF) == 0x00111111) 0x00FFF176 else brushSpec.colorArgb and 0x00FFFFFF),
+                size = brushSpec.size.coerceAtLeast(16f),
+                custom = null,
+            )
+            BrushKind.CUSTOM -> brushSpec.copy(
+                kind = kind,
+                colorArgb = (0xFF shl 24) or (brushSpec.colorArgb and 0x00FFFFFF),
+                custom = brushSpec.custom ?: CustomBrushSpec(),
+            )
+        }
+        setTool(ToolMode.PEN)
+    }
+
+    fun updateCustomBrush(custom: CustomBrushSpec) {
+        brushSpec = brushSpec.copy(kind = BrushKind.CUSTOM, custom = custom)
         setTool(ToolMode.PEN)
     }
 
@@ -202,6 +250,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         eraserModeState = mode
         preferences.edit().putString("eraser_mode", mode.name).apply()
         setTool(ToolMode.ERASER)
+    }
+
+    fun setLassoCoverageMode(mode: LassoCoverageMode) {
+        lassoCoverageModeState = mode
+        preferences.edit().putString("lasso_coverage", mode.name).apply()
+        setTool(ToolMode.LASSO)
     }
 
     fun activatePage(index: Int) { activeSession?.activePageIndex = index.coerceAtLeast(0) }
@@ -223,7 +277,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun endErase(page: PageSession) { if (page.endEraseGesture()) markDirty() }
 
     fun selectWithLasso(page: PageSession, lasso: Stroke) {
-        val count = page.selectWithLasso(lasso.inputs)
+        val count = page.selectWithLasso(lasso.inputs, lassoCoverageMode)
         statusMessage = if (count == 0) "選択なし" else "$count 本の線を選択"
     }
 
@@ -235,6 +289,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun scaleSelectedStrokes(factor: Float) {
         val page = activePage ?: return
         if (page.scaleSelectedStrokes(factor)) markDirty()
+    }
+
+    fun applyCurrentBrushToSelected() {
+        val page = activePage ?: return
+        if (page.restyleSelectedStrokes(
+                colorArgb = brushSpec.colorArgb,
+                size = brushSpec.size,
+                kind = brushSpec.kind,
+                custom = brushSpec.custom,
+            )
+        ) markDirty()
+    }
+
+    fun updateSelectedBrush(
+        colorArgb: Int? = null,
+        size: Float? = null,
+        kind: BrushKind? = null,
+    ) {
+        val page = activePage ?: return
+        val resolvedKind = kind
+        val resolvedColor = colorArgb?.let { color ->
+            if ((resolvedKind ?: brushSpec.kind) == BrushKind.HIGHLIGHTER) {
+                (0x66 shl 24) or (color and 0x00FFFFFF)
+            } else {
+                (0xFF shl 24) or (color and 0x00FFFFFF)
+            }
+        }
+        if (page.restyleSelectedStrokes(
+                colorArgb = resolvedColor,
+                size = size,
+                kind = resolvedKind,
+                custom = if (resolvedKind == BrushKind.CUSTOM) brushSpec.custom else null,
+            )
+        ) markDirty()
     }
 
     fun deleteSelectedStrokes() {
