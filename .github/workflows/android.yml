@@ -27,7 +27,7 @@ jobs:
         shell: bash
         run: |
           cat scripts/.feature_payload2/chunk* | base64 -d > /tmp/features.tar.gz
-          echo '201cb457f32c2ca19c151488012f21ff71e0100542a32a8d0d46c67db67c54e4  /tmp/features.tar.gz' | sha256sum -c -
+          echo '45d22ee11ee642062f15e3214f8b20ba71c60769cf9454584b87f86d8516a09d  /tmp/features.tar.gz' | sha256sum -c -
           tar -xzf /tmp/features.tar.gz
 
       - name: Set up JDK 17
