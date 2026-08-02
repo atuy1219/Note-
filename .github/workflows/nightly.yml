@@ -86,7 +86,7 @@ jobs:
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
 
       - name: Upload nightly artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: note-nightly-${{ steps.version.outputs.short_sha }}
           path: dist/*
