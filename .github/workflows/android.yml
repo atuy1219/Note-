@@ -21,7 +21,6 @@ jobs:
           fetch-depth: 0
 
       - name: Reconstruct source changes
-        shell: bash
         run: |
           cat scripts/.payload/models.* | base64 -d > app/src/main/java/com/atuy/note/data/Models.kt
           cat scripts/.payload_text/ink.* > app/src/main/java/com/atuy/note/ink/InkPageView.kt
@@ -30,50 +29,39 @@ jobs:
           sed -i 's/^             Spacer(Modifier.width(6.dp))/            Spacer(Modifier.width(6.dp))/' /tmp/apply_storage_lasso.py
           python /tmp/apply_storage_lasso.py
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v3
 
       - name: Install Android SDK 35
         run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
 
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
 
       - name: Build and test
-        shell: bash
-        run: |
-          for attempt in 1 2 3; do
-            if gradle :app:assembleDebug :app:testDebugUnitTest --stacktrace; then
-              exit 0
-            fi
-            if [ "$attempt" -lt 3 ]; then
-              echo "Gradle attempt $attempt failed; retrying..."
-              sleep $((attempt * 20))
-            fi
-          done
-          exit 1
+        run: gradle :app:assembleDebug :app:testDebugUnitTest --stacktrace > build.log 2>&1
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ink-storage-lasso-build-log
+          path: build.log
+          if-no-files-found: warn
 
       - name: Commit verified source
-        shell: bash
         run: |
           rm -rf scripts/.payload scripts/.payload_text
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add app docs scripts
-          if git diff --cached --quiet; then
-            echo 'No source changes to commit.'
-          else
-            git commit -m 'Use Ink Storage and add lasso selection'
-            git push origin HEAD:${{ github.event.pull_request.head.ref }}
-          fi
+          git diff --cached --quiet || git commit -m 'Use Ink Storage and add lasso selection'
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
