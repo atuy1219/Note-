@@ -110,6 +110,16 @@ class NoteRepository(private val context: Context) {
             }
         }
 
+    suspend fun deleteNote(noteId: String, current: LibraryIndex): LibraryIndex = withContext(Dispatchers.IO) {
+        ioMutex.withLock {
+            noteFile(noteId).delete()
+            thumbnailFile(noteId).delete()
+            File(pdfCacheDir, "$noteId.pdf").delete()
+            sessionImageDir(noteId).deleteRecursively()
+            current.copy(notes = current.notes.filterNot { it.id == noteId }).also(::writeLibrary)
+        }
+    }
+
     suspend fun importImage(session: NoteSession, page: PageSession, uri: Uri): ImportedPageImage =
         withContext(Dispatchers.IO) {
             val bitmap = decodeContentImage(uri, 4096) ?: error("Could not decode image")
@@ -221,6 +231,51 @@ class NoteRepository(private val context: Context) {
                 }.getOrNull()
             }
         }
+
+    suspend fun renderPagePreview(session: NoteSession, page: PageSession, targetWidth: Int): Bitmap {
+        val width = targetWidth.coerceIn(160, 1200)
+        val height = (width * page.height / page.width).toInt().coerceAtLeast(1)
+        val base = renderPdfPage(session, page, width)
+            ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
+        return withContext(Dispatchers.Default) {
+            val canvas = Canvas(base)
+            val sx = base.width / page.width
+            val sy = base.height / page.height
+            val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+            page.images.forEach { image ->
+                val imageBitmap = session.imageBitmaps[image.entryName] ?: return@forEach
+                canvas.drawBitmap(
+                    imageBitmap,
+                    null,
+                    RectF(
+                        image.x * sx,
+                        image.y * sy,
+                        (image.x + image.width) * sx,
+                        (image.y + image.height) * sy,
+                    ),
+                    imagePaint,
+                )
+            }
+            page.strokes.forEach { runtime ->
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = runtime.stored.brush.colorArgb
+                    strokeWidth = runtime.stored.brush.size * sx
+                    style = Paint.Style.STROKE
+                    strokeCap = Paint.Cap.ROUND
+                    strokeJoin = Paint.Join.ROUND
+                }
+                if (runtime.samples.size == 1) {
+                    val sample = runtime.samples.first()
+                    canvas.drawCircle(sample.x * sx, sample.y * sy, paint.strokeWidth / 2f, paint)
+                } else {
+                    runtime.samples.zipWithNext().forEach { (a, b) ->
+                        canvas.drawLine(a.x * sx, a.y * sy, b.x * sx, b.y * sy, paint)
+                    }
+                }
+            }
+            base
+        }
+    }
 
     fun noteFiles(): List<File> =
         noteDir.listFiles { f -> f.extension == NOTE_EXTENSION.removePrefix(".") }?.toList().orEmpty()
