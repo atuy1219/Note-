@@ -1,5 +1,6 @@
 name: Apply Goodnotes foundation
 
+# Retry after correcting the verified patch chunk.
 on:
   push:
     branches:
