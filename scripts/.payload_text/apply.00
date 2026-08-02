@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+from pathlib import Path
+
+ROOT = Path.cwd()
+
+def replace_once(path, old, new):
+    p = ROOT / path
+    text = p.read_text()
+    count = text.count(old)
+    if count != 1:
+        raise RuntimeError(f"{path}: expected one occurrence, found {count} for: {old[:100]!r}")
+    p.write_text(text.replace(old, new, 1))
+
+
+replace_once(
+    'app/build.gradle.kts',
+    '        versionCode = 2\n        versionName = "0.2.0"',
+    '        versionCode = 3\n        versionName = "0.3.0"',
+)
+replace_once(
+    'app/build.gradle.kts',
+    '    implementation("androidx.ink:ink-brush:$inkVersion")\n',
+    '    implementation("androidx.ink:ink-brush:$inkVersion")\n    implementation("androidx.ink:ink-geometry:$inkVersion")\n',
+)
+
+repo = 'app/src/main/java/com/atuy/note/data/NoteRepository.kt'
+replace_once(repo,
+    '                writeArchive(file, document, null, emptyMap())\n                val summary = summaryFor(document, renderThumbnail(document, null, emptyMap()))',
+    '                writeArchive(file, document, null, emptyMap(), emptyMap())\n                val summary = summaryFor(document, renderThumbnail(document, null, emptyMap(), emptyMap()))',
+)
+replace_once(repo,
+    '                writeArchive(file, document, pdfFile, emptyMap())\n                val thumb = renderThumbnail(document, pdfFile, emptyMap())',
+    '                writeArchive(file, document, pdfFile, emptyMap(), emptyMap())\n                val thumb = renderThumbnail(document, pdfFile, emptyMap(), emptyMap())',
+)
+replace_once(repo,
+    '            val imageFiles = mutableMapOf<String, File>()\n            val imageBitmaps = mutableMapOf<String, Bitmap>()\n            var document: NoteDocument? = null',
+    '            val imageFiles = mutableMapOf<String, File>()\n            val imageBitmaps = mutableMapOf<String, Bitmap>()\n            val inkEntries = mutableMapOf<String, ByteArray>()\n            var document: NoteDocument? = null',
+)
+replace_once(repo,
+    '''                        entry.name.startsWith("images/") && !entry.isDirectory -> {
+                            val file = cacheFileForEntry(sessionImages, entry.name)
+                            FileOutputStream(file).use { zip.copyTo(it) }
+                            imageFiles[entry.name] = file
+                            BitmapFactory.decodeFile(file.absolutePath)?.let { imageBitmaps[entry.name] = it }
+                        }''',
+    '''                        entry.name.startsWith("images/") && !entry.isDirectory -> {
+                            val file = cacheFileForEntry(sessionImages, entry.name)
+                            FileOutputStream(file).use { zip.copyTo(it) }
+                            imageFiles[entry.name] = file
+                            BitmapFactory.decodeFile(file.absolutePath)?.let { imageBitmaps[entry.name] = it }
+                        }
+                        entry.name.startsWith("ink/") && !entry.isDirectory ->
+                            inkEntries[entry.name] = zip.readBytes()''',
+)
+replace_once(repo,
+    '''                imageFiles = imageFiles,
+                imageBitmaps = imageBitmaps,
+            )''',
+    '''                imageFiles = imageFiles,
+                imageBitmaps = imageBitmaps,
+                inkEntries = inkEntries,
+            )''',
+)
+replace_once(repo,
+    '''            val document = session.toDocument(nextRevision = true)
+            writeArchive(session.archiveFile, document, session.sourcePdfFile, session.imageFiles)
+            session.revision = document.revision
+            session.updatedAt = document.updatedAt
+            session.dirty = false
+            val thumb = renderThumbnail(document, session.sourcePdfFile, session.imageFiles)''',
+    '''            val document = session.toDocument(nextRevision = true)
+            val inkEntries = session.encodedInkEntries()
+            writeArchive(session.archiveFile, document, session.sourcePdfFile, session.imageFiles, inkEntries)
+            session.revision = document.revision
+            session.updatedAt = document.updatedAt
+            session.dirty = false
+            val thumb = renderThumbnail(document, session.sourcePdfFile, session.imageFiles, inkEntries)''',
+)
+replace_once(repo,
+    '        val extractedImages = mutableMapOf<String, File>()\n        var hasPdf = false',
+    '        val extractedImages = mutableMapOf<String, File>()\n        val extractedInkEntries = mutableMapOf<String, ByteArray>()\n        var hasPdf = false',
+)
+replace_once(repo,
+    '''                    entry.name.startsWith("images/") && !entry.isDirectory -> {
+                        val file = cacheFileForEntry(extractedImagesDir, entry.name)
+                        FileOutputStream(file).use { zip.copyTo(it) }
+                        extractedImages[entry.name] = file
+                    }''',
+    '''                    entry.name.startsWith("images/") && !entry.isDirectory -> {
+                        val file = cacheFileForEntry(extractedIm
