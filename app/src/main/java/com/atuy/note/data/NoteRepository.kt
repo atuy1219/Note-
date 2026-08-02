@@ -6,7 +6,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Rect
+import android.graphics.RectF
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
@@ -26,12 +26,15 @@ import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
+import kotlin.math.max
+import kotlin.math.min
 
 class NoteRepository(private val context: Context) {
     private val root = File(context.filesDir, "notebooks").apply { mkdirs() }
     private val noteDir = File(root, "notes").apply { mkdirs() }
     private val thumbDir = File(root, "thumbnails").apply { mkdirs() }
     private val pdfCacheDir = File(context.cacheDir, "note-pdf").apply { mkdirs() }
+    private val imageCacheDir = File(context.cacheDir, "note-images").apply { mkdirs() }
     private val libraryFile = File(root, "library.json")
     private val json = Json {
         prettyPrint = true
@@ -62,8 +65,8 @@ class NoteRepository(private val context: Context) {
             ioMutex.withLock {
                 val document = NoteDocument(title = title.trim().ifBlank { "Untitled" }, folderId = folderId)
                 val file = noteFile(document.id)
-                writeArchive(file, document, null)
-                val summary = summaryFor(document, renderThumbnail(document, null))
+                writeArchive(file, document, null, emptyMap())
+                val summary = summaryFor(document, renderThumbnail(document, null, emptyMap()))
                 val next = current.copy(notes = current.notes.filterNot { it.id == summary.id } + summary)
                 writeLibrary(next)
                 next to summary
@@ -98,8 +101,8 @@ class NoteRepository(private val context: Context) {
                     pages = pages.ifEmpty { listOf(PageDocument()) },
                 )
                 val file = noteFile(id)
-                writeArchive(file, document, pdfFile)
-                val thumb = renderThumbnail(document, pdfFile)
+                writeArchive(file, document, pdfFile, emptyMap())
+                val thumb = renderThumbnail(document, pdfFile, emptyMap())
                 val summary = summaryFor(document, thumb)
                 val next = current.copy(notes = current.notes.filterNot { it.id == id } + summary)
                 writeLibrary(next)
@@ -107,35 +110,86 @@ class NoteRepository(private val context: Context) {
             }
         }
 
+    suspend fun importImage(session: NoteSession, page: PageSession, uri: Uri): ImportedPageImage =
+        withContext(Dispatchers.IO) {
+            val bitmap = decodeContentImage(uri, 4096) ?: error("Could not decode image")
+            val id = UUID.randomUUID().toString()
+            val entryName = "images/$id.png"
+            val sessionDir = sessionImageDir(session.id)
+            val outputFile = File(sessionDir, "$id.png")
+            FileOutputStream(outputFile).use { output ->
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) { "Could not store image" }
+            }
+            val maxWidth = page.width * 0.72f
+            val maxHeight = page.height * 0.58f
+            val fitScale = min(maxWidth / bitmap.width.toFloat(), maxHeight / bitmap.height.toFloat())
+                .coerceAtMost(1f)
+                .coerceAtLeast(0.01f)
+            val placedWidth = bitmap.width * fitScale
+            val placedHeight = bitmap.height * fitScale
+            ImportedPageImage(
+                image = PageImage(
+                    id = id,
+                    entryName = entryName,
+                    x = (page.width - placedWidth) / 2f,
+                    y = (page.height - placedHeight) / 2f,
+                    width = placedWidth,
+                    height = placedHeight,
+                ),
+                entryFile = outputFile,
+                bitmap = bitmap,
+            )
+        }
+
     suspend fun loadSession(noteId: String): NoteSession = withContext(Dispatchers.IO) {
         ioMutex.withLock {
             val archive = noteFile(noteId)
             require(archive.isFile) { "Notebook not found: $noteId" }
-            val extractedPdf = File(pdfCacheDir, "$noteId.pdf")
+            val extractedPdf = File(pdfCacheDir, "$noteId.pdf").apply { delete() }
+            val sessionImages = sessionImageDir(noteId).apply {
+                deleteRecursively()
+                mkdirs()
+            }
+            val imageFiles = mutableMapOf<String, File>()
+            val imageBitmaps = mutableMapOf<String, Bitmap>()
             var document: NoteDocument? = null
             ZipInputStream(BufferedInputStream(FileInputStream(archive))).use { zip ->
                 while (true) {
                     val entry = zip.nextEntry ?: break
-                    when (entry.name) {
-                        "manifest.json" -> document = json.decodeFromString(zip.readBytes().decodeToString())
-                        "background/source.pdf" -> FileOutputStream(extractedPdf).use { zip.copyTo(it) }
+                    when {
+                        entry.name == "manifest.json" ->
+                            document = json.decodeFromString(zip.readBytes().decodeToString())
+                        entry.name == "background/source.pdf" ->
+                            FileOutputStream(extractedPdf).use { zip.copyTo(it) }
+                        entry.name.startsWith("images/") && !entry.isDirectory -> {
+                            val file = cacheFileForEntry(sessionImages, entry.name)
+                            FileOutputStream(file).use { zip.copyTo(it) }
+                            imageFiles[entry.name] = file
+                            BitmapFactory.decodeFile(file.absolutePath)?.let { imageBitmaps[entry.name] = it }
+                        }
                     }
                     zip.closeEntry()
                 }
             }
             val loaded = requireNotNull(document) { "Invalid .atnote: manifest.json missing" }
-            NoteSession(loaded, archive, extractedPdf.takeIf { it.isFile })
+            NoteSession(
+                document = loaded,
+                archiveFile = archive,
+                sourcePdfFile = extractedPdf.takeIf { it.isFile },
+                imageFiles = imageFiles,
+                imageBitmaps = imageBitmaps,
+            )
         }
     }
 
     suspend fun saveSession(session: NoteSession, current: LibraryIndex): LibraryIndex = withContext(Dispatchers.IO) {
         ioMutex.withLock {
             val document = session.toDocument(nextRevision = true)
-            writeArchive(session.archiveFile, document, session.sourcePdfFile)
+            writeArchive(session.archiveFile, document, session.sourcePdfFile, session.imageFiles)
             session.revision = document.revision
             session.updatedAt = document.updatedAt
             session.dirty = false
-            val thumb = renderThumbnail(document, session.sourcePdfFile)
+            val thumb = renderThumbnail(document, session.sourcePdfFile, session.imageFiles)
             val summary = summaryFor(document, thumb)
             current.copy(notes = current.notes.filterNot { it.id == session.id } + summary).also(::writeLibrary)
         }
@@ -163,24 +217,24 @@ class NoteRepository(private val context: Context) {
             }
         }
 
-    fun noteFiles(): List<File> = noteDir.listFiles { f -> f.extension == NOTE_EXTENSION.removePrefix(".") }?.toList().orEmpty()
+    fun noteFiles(): List<File> =
+        noteDir.listFiles { f -> f.extension == NOTE_EXTENSION.removePrefix(".") }?.toList().orEmpty()
 
     fun noteFileById(id: String): File = noteFile(id)
 
     fun readDocument(file: File): NoteDocument? = runCatching {
-    var document: NoteDocument? = null
-    ZipInputStream(BufferedInputStream(FileInputStream(file))).use { zip ->
-        while (document == null) {
-            val entry = zip.nextEntry ?: break
-            if (entry.name == "manifest.json") {
-                document = json.decodeFromString<NoteDocument>(zip.readBytes().decodeToString())
+        var document: NoteDocument? = null
+        ZipInputStream(BufferedInputStream(FileInputStream(file))).use { zip ->
+            while (document == null) {
+                val entry = zip.nextEntry ?: break
+                if (entry.name == "manifest.json") {
+                    document = json.decodeFromString<NoteDocument>(zip.readBytes().decodeToString())
+                }
+                zip.closeEntry()
             }
-            zip.closeEntry()
         }
-    }
-    document
-}.getOrNull()
-
+        document
+    }.getOrNull()
 
     fun replaceFromRemoteBlocking(tempFile: File) {
         val doc = requireNotNull(readDocument(tempFile)) { "Downloaded notebook is invalid" }
@@ -190,15 +244,26 @@ class NoteRepository(private val context: Context) {
     fun replaceFromRemoteAsConflict(tempFile: File, folderId: String?) {
         var document: NoteDocument? = null
         val extractedPdf = File.createTempFile("note-conflict-", ".pdf", pdfCacheDir)
+        val extractedImagesDir = File.createTempFile("note-conflict-images-", "", imageCacheDir).apply {
+            delete()
+            mkdirs()
+        }
+        val extractedImages = mutableMapOf<String, File>()
         var hasPdf = false
         ZipInputStream(BufferedInputStream(FileInputStream(tempFile))).use { zip ->
             while (true) {
                 val entry = zip.nextEntry ?: break
-                when (entry.name) {
-                    "manifest.json" -> document = json.decodeFromString(zip.readBytes().decodeToString())
-                    "background/source.pdf" -> {
+                when {
+                    entry.name == "manifest.json" ->
+                        document = json.decodeFromString(zip.readBytes().decodeToString())
+                    entry.name == "background/source.pdf" -> {
                         FileOutputStream(extractedPdf).use { zip.copyTo(it) }
                         hasPdf = true
+                    }
+                    entry.name.startsWith("images/") && !entry.isDirectory -> {
+                        val file = cacheFileForEntry(extractedImagesDir, entry.name)
+                        FileOutputStream(file).use { zip.copyTo(it) }
+                        extractedImages[entry.name] = file
                     }
                 }
                 zip.closeEntry()
@@ -213,8 +278,9 @@ class NoteRepository(private val context: Context) {
             updatedAt = System.currentTimeMillis(),
             revision = source.revision + 1,
         )
-        writeArchive(noteFile(id), conflict, extractedPdf.takeIf { hasPdf })
+        writeArchive(noteFile(id), conflict, extractedPdf.takeIf { hasPdf }, extractedImages)
         extractedPdf.delete()
+        extractedImagesDir.deleteRecursively()
     }
 
     suspend fun replaceFromRemote(tempFile: File) = withContext(Dispatchers.IO) {
@@ -257,7 +323,12 @@ class NoteRepository(private val context: Context) {
         }
     }
 
-    private fun writeArchive(target: File, document: NoteDocument, pdfFile: File?) {
+    private fun writeArchive(
+        target: File,
+        document: NoteDocument,
+        pdfFile: File?,
+        imageFiles: Map<String, File>,
+    ) {
         val temp = File(target.parentFile, "${target.name}.tmp")
         ZipOutputStream(BufferedOutputStream(FileOutputStream(temp))).use { zip ->
             zip.putNextEntry(ZipEntry("manifest.json"))
@@ -268,6 +339,15 @@ class NoteRepository(private val context: Context) {
                 FileInputStream(pdfFile).use { it.copyTo(zip) }
                 zip.closeEntry()
             }
+            val referencedImages = document.pages.flatMap { it.images }.map { it.entryName }.distinct()
+            referencedImages.forEach { entryName ->
+                val imageFile = imageFiles[entryName]
+                if (imageFile?.isFile == true) {
+                    zip.putNextEntry(ZipEntry(entryName))
+                    FileInputStream(imageFile).use { it.copyTo(zip) }
+                    zip.closeEntry()
+                }
+            }
         }
         if (!temp.renameTo(target)) {
             temp.copyTo(target, overwrite = true)
@@ -275,7 +355,11 @@ class NoteRepository(private val context: Context) {
         }
     }
 
-    private fun renderThumbnail(document: NoteDocument, pdfFile: File?): File {
+    private fun renderThumbnail(
+        document: NoteDocument,
+        pdfFile: File?,
+        imageFiles: Map<String, File>,
+    ): File {
         val width = 480
         val first = document.pages.firstOrNull() ?: PageDocument()
         val height = (width * first.height / first.width).toInt().coerceAtLeast(1)
@@ -293,10 +377,30 @@ class NoteRepository(private val context: Context) {
                 }
             }.getOrNull()
         } else null
-        val outputBitmap = bitmap ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
+        val outputBitmap = bitmap ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.WHITE)
+        }
         val canvas = Canvas(outputBitmap)
         val sx = width / first.width
         val sy = height / first.height
+
+        first.images.forEach { image ->
+            val file = imageFiles[image.entryName] ?: return@forEach
+            val imageBitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return@forEach
+            canvas.drawBitmap(
+                imageBitmap,
+                null,
+                RectF(
+                    image.x * sx,
+                    image.y * sy,
+                    (image.x + image.width) * sx,
+                    (image.y + image.height) * sy,
+                ),
+                Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG),
+            )
+            imageBitmap.recycle()
+        }
+
         first.strokes.forEach { stroke ->
             val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color = stroke.brush.colorArgb
@@ -313,6 +417,26 @@ class NoteRepository(private val context: Context) {
         FileOutputStream(file).use { outputBitmap.compress(Bitmap.CompressFormat.PNG, 90, it) }
         outputBitmap.recycle()
         return file
+    }
+
+    private fun decodeContentImage(uri: Uri, maxDimension: Int): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sampleSize = 1
+        while (max(bounds.outWidth, bounds.outHeight) / sampleSize > maxDimension) sampleSize *= 2
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        return context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) }
+    }
+
+    private fun sessionImageDir(noteId: String) = File(imageCacheDir, noteId).apply { mkdirs() }
+
+    private fun cacheFileForEntry(directory: File, entryName: String): File {
+        val safeName = entryName.substringAfterLast('/').replace(Regex("[^A-Za-z0-9._-]"), "_")
+        return File(directory, safeName.ifBlank { UUID.randomUUID().toString() })
     }
 
     private fun summaryFor(document: NoteDocument, thumbnail: File?): NoteSummary = NoteSummary(
