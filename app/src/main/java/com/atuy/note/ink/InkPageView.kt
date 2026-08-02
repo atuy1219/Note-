@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.DashPathEffect
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.RectF
@@ -13,17 +14,18 @@ import android.widget.FrameLayout
 import androidx.ink.authoring.InProgressStrokeId
 import androidx.ink.authoring.InProgressStrokesFinishedListener
 import androidx.ink.authoring.InProgressStrokesView
+import androidx.ink.brush.Brush
+import androidx.ink.brush.StockBrushes
 import androidx.ink.rendering.android.canvas.CanvasStrokeRenderer
 import androidx.ink.strokes.Stroke
 import androidx.input.motionprediction.MotionEventPredictor
 import com.atuy.note.data.BrushSpec
-import com.atuy.note.data.InkSample
 import com.atuy.note.data.PageImage
 import com.atuy.note.data.PageSession
 import com.atuy.note.data.RuntimeStroke
 import com.atuy.note.data.ToolMode
 import com.atuy.note.data.toBrush
-import com.atuy.note.data.toStoredStroke
+import com.atuy.note.data.toRuntimeStroke
 import kotlin.math.min
 
 class InkPageView(context: Context) : FrameLayout(context) {
@@ -31,8 +33,15 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private val wetView = InProgressStrokesView(context)
     private val predictor = MotionEventPredictor.newInstance(this)
     private val pointerStrokes = mutableMapOf<Int, InProgressStrokeId>()
-    private val strokeSamples = mutableMapOf<InProgressStrokeId, MutableList<InkSample>>()
     private val strokeBrushSpecs = mutableMapOf<InProgressStrokeId, BrushSpec>()
+    private val lassoStrokeIds = mutableSetOf<InProgressStrokeId>()
+    private val lassoBrush = Brush.createWithColorIntArgb(
+        StockBrushes.dashedLine(),
+        0xFF1976D2.toInt(),
+        3.2f,
+        0.1f,
+    )
+
     private var page: PageSession? = null
     private var backgroundBitmap: Bitmap? = null
     private var imageBitmaps: Map<String, Bitmap> = emptyMap()
@@ -42,16 +51,25 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private var onEraseStart: () -> Unit = {}
     private var onErase: (Float, Float, Float) -> Unit = { _, _, _ -> }
     private var onEraseEnd: () -> Unit = {}
+    private var onLassoFinished: (Stroke) -> Unit = {}
+    private var onSelectedTransformStart: () -> Boolean = { false }
+    private var onSelectedMove: (Float, Float) -> Unit = { _, _ -> }
+    private var onSelectedTransformEnd: () -> Unit = {}
+    private var onSelectedTransformCancel: () -> Unit = {}
     private var onImageSelected: (String?) -> Unit = {}
     private var onImageTransformStart: (String) -> Boolean = { false }
     private var onImageMove: (String, Float, Float) -> Unit = { _, _, _ -> }
     private var onImageTransformEnd: () -> Unit = {}
     private var onImageTransformCancel: () -> Unit = {}
     private var onActivated: () -> Unit = {}
+
     private var draggingImageId: String? = null
     private var imageDragOffsetX = 0f
     private var imageDragOffsetY = 0f
     private var eraserGestureActive = false
+    private var selectedDragActive = false
+    private var selectedDragStartX = 0f
+    private var selectedDragStartY = 0f
 
     init {
         setWillNotDraw(false)
@@ -63,10 +81,12 @@ class InkPageView(context: Context) : FrameLayout(context) {
         wetView.addFinishedStrokesListener(object : InProgressStrokesFinishedListener {
             override fun onStrokesFinished(strokes: Map<InProgressStrokeId, Stroke>) {
                 strokes.forEach { (id, stroke) ->
-                    val samples = strokeSamples.remove(id).orEmpty()
-                    val spec = strokeBrushSpecs.remove(id) ?: brushProvider()
-                    val stored = stroke.toStoredStroke(spec, samples)
-                    onStrokeAdded(RuntimeStroke(stored, stroke))
+                    if (lassoStrokeIds.remove(id)) {
+                        onLassoFinished(stroke)
+                    } else {
+                        val spec = strokeBrushSpecs.remove(id) ?: brushProvider()
+                        onStrokeAdded(stroke.toRuntimeStroke(spec))
+                    }
                 }
                 wetView.removeFinishedStrokes(strokes.keys)
                 dryView.invalidate()
@@ -85,6 +105,11 @@ class InkPageView(context: Context) : FrameLayout(context) {
         onEraseStart: () -> Unit,
         onErase: (Float, Float, Float) -> Unit,
         onEraseEnd: () -> Unit,
+        onLassoFinished: (Stroke) -> Unit,
+        onSelectedTransformStart: () -> Boolean,
+        onSelectedMove: (Float, Float) -> Unit,
+        onSelectedTransformEnd: () -> Unit,
+        onSelectedTransformCancel: () -> Unit,
         onImageSelected: (String?) -> Unit,
         onImageTransformStart: (String) -> Boolean,
         onImageMove: (String, Float, Float) -> Unit,
@@ -101,6 +126,11 @@ class InkPageView(context: Context) : FrameLayout(context) {
         this.onEraseStart = onEraseStart
         this.onErase = onErase
         this.onEraseEnd = onEraseEnd
+        this.onLassoFinished = onLassoFinished
+        this.onSelectedTransformStart = onSelectedTransformStart
+        this.onSelectedMove = onSelectedMove
+        this.onSelectedTransformEnd = onSelectedTransformEnd
+        this.onSelectedTransformCancel = onSelectedTransformCancel
         this.onImageSelected = onImageSelected
         this.onImageTransformStart = onImageTransformStart
         this.onImageMove = onImageMove
@@ -126,7 +156,9 @@ class InkPageView(context: Context) : FrameLayout(context) {
             onActivated()
         }
 
+        val scale = contentScale()
         if (toolProvider() == ToolMode.IMAGE) return handleImageMotion(event, index)
+        if (toolProvider() == ToolMode.LASSO) return handleLassoMotion(event, index, scale)
 
         predictor.record(event)
         val pointerId = event.getPointerId(index)
@@ -134,7 +166,6 @@ class InkPageView(context: Context) : FrameLayout(context) {
             event.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY != 0 ||
             event.buttonState and MotionEvent.BUTTON_STYLUS_SECONDARY != 0
         val erasing = toolProvider() == ToolMode.ERASER || temporaryEraser
-        val scale = contentScale()
         val worldX = event.getX(index) / scale
         val worldY = event.getY(index) / scale
 
@@ -157,18 +188,73 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
                     onErase(worldX, worldY, 28f)
                     finishEraserGesture()
-                    requestDisallowInterceptTouchEvent(false)
+                    releaseParentIntercept()
                     dryView.invalidate()
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     finishEraserGesture()
-                    requestDisallowInterceptTouchEvent(false)
+                    releaseParentIntercept()
                     dryView.invalidate()
                 }
             }
             return true
         }
 
+        return handleAuthoredStroke(event, index, scale, brushProvider().toBrush(), false)
+    }
+
+    private fun handleLassoMotion(event: MotionEvent, pointerIndex: Int, scale: Float): Boolean {
+        val currentPage = page ?: return true
+        val worldX = event.getX(pointerIndex) / scale
+        val worldY = event.getY(pointerIndex) / scale
+
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                if (currentPage.isPointInsideStrokeSelection(worldX, worldY) && onSelectedTransformStart()) {
+                    selectedDragActive = true
+                    selectedDragStartX = worldX
+                    selectedDragStartY = worldY
+                    return true
+                }
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (selectedDragActive) {
+                    onSelectedMove(worldX - selectedDragStartX, worldY - selectedDragStartY)
+                    dryView.invalidate()
+                    return true
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                if (selectedDragActive) {
+                    selectedDragActive = false
+                    onSelectedTransformEnd()
+                    releaseParentIntercept()
+                 dryView.invalidate()
+                    return true
+                }
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                if (selectedDragActive) {
+                    selectedDragActive = false
+                    onSelectedTransformCancel()
+                    releaseParentIntercept()
+                    dryView.invalidate()
+                    return true
+                }
+            }
+        }
+        return handleAuthoredStroke(event, pointerIndex, scale, lassoBrush, true)
+    }
+
+    private fun handleAuthoredStroke(
+        event: MotionEvent,
+        pointerIndex: Int,
+        scale: Float,
+        brush: Brush,
+        lasso: Boolean,
+    ): Boolean {
+        predictor.record(event)
+        val pointerId = event.getPointerId(pointerIndex)
         return when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 requestUnbufferedDispatch(event)
@@ -176,30 +262,21 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 val id = wetView.startStroke(
                     event = event,
                     pointerId = pointerId,
-                    brush = brushProvider().toBrush(),
+                    brush = brush,
                     motionEventToWorldTransform = transform,
                     strokeToWorldTransform = Matrix(),
                 )
                 pointerStrokes[pointerId] = id
-                strokeSamples[id] = mutableListOf(sample(event, index, scale))
-                strokeBrushSpecs[id] = brushProvider()
+                if (lasso) lassoStrokeIds += id else strokeBrushSpecs[id] = brushProvider()
                 true
             }
             MotionEvent.ACTION_MOVE -> {
-                for (pointerIndex in 0 until event.pointerCount) {
-                    val id = pointerStrokes[event.getPointerId(pointerIndex)] ?: continue
-                    val samples = strokeSamples[id] ?: continue
-                    for (historyIndex in 0 until event.historySize) {
-                        samples += InkSample(
-                            x = event.getHistoricalX(pointerIndex, historyIndex) / scale,
-                            y = event.getHistoricalY(pointerIndex, historyIndex) / scale,
-                            pressure = event.getHistoricalPressure(pointerIndex, historyIndex),
-                        )
-                    }
-                    samples += sample(event, pointerIndex, scale)
+                for (index in 0 until event.pointerCount) {
+                    val currentPointerId = event.getPointerId(index)
+                    val id = pointerStrokes[currentPointerId] ?: continue
                     val predicted = predictor.predict()
                     try {
-                        wetView.addToStroke(event, event.getPointerId(pointerIndex), id, predicted)
+                        wetView.addToStroke(event, currentPointerId, id, predicted)
                     } finally {
                         predicted?.recycle()
                     }
@@ -207,20 +284,16 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
-                val id = pointerStrokes.remove(pointerId)
-                if (id != null) {
-                    strokeSamples[id]?.add(sample(event, index, scale))
-                    wetView.finishStroke(event, pointerId, id)
-                }
-                requestDisallowInterceptTouchEvent(false)
+                pointerStrokes.remove(pointerId)?.let { id -> wetView.finishStroke(event, pointerId, id) }
+                releaseParentIntercept()
                 true
             }
             MotionEvent.ACTION_CANCEL -> {
                 pointerStrokes.values.forEach { id -> wetView.cancelStroke(id, event) }
                 pointerStrokes.clear()
-                strokeSamples.clear()
                 strokeBrushSpecs.clear()
-                requestDisallowInterceptTouchEvent(false)
+                lassoStrokeIds.clear()
+                releaseParentIntercept()
                 true
             }
             else -> true
@@ -256,14 +329,14 @@ class InkPageView(context: Context) : FrameLayout(context) {
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
                 if (draggingImageId != null) onImageTransformEnd()
                 draggingImageId = null
-                requestDisallowInterceptTouchEvent(false)
+                releaseParentIntercept()
                 dryView.invalidate()
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
                 if (draggingImageId != null) onImageTransformCancel()
                 draggingImageId = null
-                requestDisallowInterceptTouchEvent(false)
+                releaseParentIntercept()
                 dryView.invalidate()
                 return true
             }
@@ -277,11 +350,9 @@ class InkPageView(context: Context) : FrameLayout(context) {
         onEraseEnd()
     }
 
-    private fun sample(event: MotionEvent, pointerIndex: Int, scale: Float) = InkSample(
-        x = event.getX(pointerIndex) / scale,
-        y = event.getY(pointerIndex) / scale,
-        pressure = event.getPressure(pointerIndex).coerceIn(0f, 1f),
-    )
+    private fun releaseParentIntercept() {
+        requestDisallowInterceptTouchEvent(false)
+    }
 
     private fun contentScale(): Float {
         val current = page ?: return 1f
@@ -298,6 +369,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
             color = Color.rgb(25, 118, 210)
             style = Paint.Style.STROKE
             strokeWidth = 3f
+            pathEffect = DashPathEffect(floatArrayOf(12f, 8f), 0f)
         }
         var page: PageSession? = null
         var backgroundBitmap: Bitmap? = null
@@ -325,6 +397,19 @@ class InkPageView(context: Context) : FrameLayout(context) {
             transform.reset()
             transform.setScale(scale, scale)
             current.strokes.forEach { renderer.draw(canvas, it.stroke, transform) }
+
+            if (toolProvider() == ToolMode.LASSO) {
+                current.selectedStrokeBounds()?.let { bounds ->
+                    val padding = 10f * scale
+                    canvas.drawRect(
+                        bounds[0] * scale - padding,
+                        bounds[1] * scale - padding,
+                        bounds[2] * scale + padding,
+                        bounds[3] * scale + padding,
+                        selectionPaint,
+                    )
+                }
+            }
         }
 
         private fun imageRect(image: PageImage, scale: Float) = RectF(

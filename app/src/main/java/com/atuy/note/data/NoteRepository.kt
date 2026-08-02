@@ -65,8 +65,8 @@ class NoteRepository(private val context: Context) {
             ioMutex.withLock {
                 val document = NoteDocument(title = title.trim().ifBlank { "Untitled" }, folderId = folderId)
                 val file = noteFile(document.id)
-                writeArchive(file, document, null, emptyMap())
-                val summary = summaryFor(document, renderThumbnail(document, null, emptyMap()))
+                writeArchive(file, document, null, emptyMap(), emptyMap())
+                val summary = summaryFor(document, renderThumbnail(document, null, emptyMap(), emptyMap()))
                 val next = current.copy(notes = current.notes.filterNot { it.id == summary.id } + summary)
                 writeLibrary(next)
                 next to summary
@@ -101,8 +101,8 @@ class NoteRepository(private val context: Context) {
                     pages = pages.ifEmpty { listOf(PageDocument()) },
                 )
                 val file = noteFile(id)
-                writeArchive(file, document, pdfFile, emptyMap())
-                val thumb = renderThumbnail(document, pdfFile, emptyMap())
+                writeArchive(file, document, pdfFile, emptyMap(), emptyMap())
+                val thumb = renderThumbnail(document, pdfFile, emptyMap(), emptyMap())
                 val summary = summaryFor(document, thumb)
                 val next = current.copy(notes = current.notes.filterNot { it.id == id } + summary)
                 writeLibrary(next)
@@ -152,6 +152,7 @@ class NoteRepository(private val context: Context) {
             }
             val imageFiles = mutableMapOf<String, File>()
             val imageBitmaps = mutableMapOf<String, Bitmap>()
+            val inkEntries = mutableMapOf<String, ByteArray>()
             var document: NoteDocument? = null
             ZipInputStream(BufferedInputStream(FileInputStream(archive))).use { zip ->
                 while (true) {
@@ -167,6 +168,8 @@ class NoteRepository(private val context: Context) {
                             imageFiles[entry.name] = file
                             BitmapFactory.decodeFile(file.absolutePath)?.let { imageBitmaps[entry.name] = it }
                         }
+                        entry.name.startsWith("ink/") && !entry.isDirectory ->
+                            inkEntries[entry.name] = zip.readBytes()
                     }
                     zip.closeEntry()
                 }
@@ -178,6 +181,7 @@ class NoteRepository(private val context: Context) {
                 sourcePdfFile = extractedPdf.takeIf { it.isFile },
                 imageFiles = imageFiles,
                 imageBitmaps = imageBitmaps,
+                inkEntries = inkEntries,
             )
         }
     }
@@ -185,11 +189,12 @@ class NoteRepository(private val context: Context) {
     suspend fun saveSession(session: NoteSession, current: LibraryIndex): LibraryIndex = withContext(Dispatchers.IO) {
         ioMutex.withLock {
             val document = session.toDocument(nextRevision = true)
-            writeArchive(session.archiveFile, document, session.sourcePdfFile, session.imageFiles)
+            val inkEntries = session.encodedInkEntries()
+            writeArchive(session.archiveFile, document, session.sourcePdfFile, session.imageFiles, inkEntries)
             session.revision = document.revision
             session.updatedAt = document.updatedAt
             session.dirty = false
-            val thumb = renderThumbnail(document, session.sourcePdfFile, session.imageFiles)
+            val thumb = renderThumbnail(document, session.sourcePdfFile, session.imageFiles, inkEntries)
             val summary = summaryFor(document, thumb)
             current.copy(notes = current.notes.filterNot { it.id == session.id } + summary).also(::writeLibrary)
         }
@@ -249,6 +254,7 @@ class NoteRepository(private val context: Context) {
             mkdirs()
         }
         val extractedImages = mutableMapOf<String, File>()
+        val extractedInkEntries = mutableMapOf<String, ByteArray>()
         var hasPdf = false
         ZipInputStream(BufferedInputStream(FileInputStream(tempFile))).use { zip ->
             while (true) {
@@ -265,6 +271,8 @@ class NoteRepository(private val context: Context) {
                         FileOutputStream(file).use { zip.copyTo(it) }
                         extractedImages[entry.name] = file
                     }
+                    entry.name.startsWith("ink/") && !entry.isDirectory ->
+                        extractedInkEntries[entry.name] = zip.readBytes()
                 }
                 zip.closeEntry()
             }
@@ -278,7 +286,7 @@ class NoteRepository(private val context: Context) {
             updatedAt = System.currentTimeMillis(),
             revision = source.revision + 1,
         )
-        writeArchive(noteFile(id), conflict, extractedPdf.takeIf { hasPdf }, extractedImages)
+        writeArchive(noteFile(id), conflict, extractedPdf.takeIf { hasPdf }, extractedImages, extractedInkEntries)
         extractedPdf.delete()
         extractedImagesDir.deleteRecursively()
     }
@@ -328,6 +336,7 @@ class NoteRepository(private val context: Context) {
         document: NoteDocument,
         pdfFile: File?,
         imageFiles: Map<String, File>,
+        inkEntries: Map<String, ByteArray>,
     ) {
         val temp = File(target.parentFile, "${target.name}.tmp")
         ZipOutputStream(BufferedOutputStream(FileOutputStream(temp))).use { zip ->
@@ -348,6 +357,16 @@ class NoteRepository(private val context: Context) {
                     zip.closeEntry()
                 }
             }
+            val referencedInk = document.pages.flatMap { it.strokes }
+                .map { it.inkEntry }
+                .filter { it.isNotBlank() }
+                .distinct()
+            referencedInk.forEach { entryName ->
+                val encoded = inkEntries[entryName] ?: return@forEach
+                zip.putNextEntry(ZipEntry(entryName))
+                zip.write(encoded)
+                zip.closeEntry()
+            }
         }
         if (!temp.renameTo(target)) {
             temp.copyTo(target, overwrite = true)
@@ -359,6 +378,7 @@ class NoteRepository(private val context: Context) {
         document: NoteDocument,
         pdfFile: File?,
         imageFiles: Map<String, File>,
+        inkEntries: Map<String, ByteArray>,
     ): File {
         val width = 480
         val first = document.pages.firstOrNull() ?: PageDocument()
@@ -401,15 +421,16 @@ class NoteRepository(private val context: Context) {
             imageBitmap.recycle()
         }
 
-        first.strokes.forEach { stroke ->
+        first.strokes.forEach { stored ->
+            val runtime = stored.toRuntimeOrNull(inkEntries[stored.inkEntry]) ?: return@forEach
             val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = stroke.brush.colorArgb
-                strokeWidth = stroke.brush.size * sx
+                color = stored.brush.colorArgb
+                strokeWidth = stored.brush.size * sx
                 style = Paint.Style.STROKE
                 strokeCap = Paint.Cap.ROUND
                 strokeJoin = Paint.Join.ROUND
             }
-            stroke.samples.zipWithNext().forEach { (a, b) ->
+            runtime.samples.zipWithNext().forEach { (a, b) ->
                 canvas.drawLine(a.x * sx, a.y * sy, b.x * sx, b.y * sy, paint)
             }
         }

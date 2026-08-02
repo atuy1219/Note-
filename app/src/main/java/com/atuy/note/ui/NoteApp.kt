@@ -44,6 +44,7 @@ import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PictureAsPdf
@@ -415,6 +416,12 @@ private fun InkToolbar(viewModel: MainViewModel, onImportImage: () -> Unit) {
             leadingIcon = { Icon(Icons.Default.DeleteOutline, null, Modifier.size(18.dp)) },
         )
         FilterChip(
+            selected = viewModel.toolMode == ToolMode.LASSO,
+            onClick = { viewModel.setTool(ToolMode.LASSO) },
+            label = { Text("投げ縄") },
+            leadingIcon = { Icon(Icons.Default.Gesture, null, Modifier.size(18.dp)) },
+        )
+        FilterChip(
             selected = viewModel.eraserMode == EraserMode.PARTIAL,
             onClick = { viewModel.setEraserMode(EraserMode.PARTIAL) },
             label = { Text("部分消し") },
@@ -424,6 +431,13 @@ private fun InkToolbar(viewModel: MainViewModel, onImportImage: () -> Unit) {
             onClick = { viewModel.setEraserMode(EraserMode.WHOLE_STROKE) },
             label = { Text("線全体") },
         )
+        if (viewModel.activePage?.selectedStrokeIds?.isNotEmpty() == true) {
+            TextButton(onClick = { viewModel.scaleSelectedStrokes(0.85f) }) { Text("選択−") }
+            TextButton(onClick = { viewModel.scaleSelectedStrokes(1.15f) }) { Text("選択＋") }
+            IconButton(onClick = viewModel::deleteSelectedStrokes) {
+                Icon(Icons.Default.DeleteOutline, "Delete selected strokes")
+            }
+        }
         FilledTonalButton(onClick = onImportImage) {
             Icon(Icons.Default.Image, null, Modifier.size(18.dp))
             Spacer(Modifier.width(6.dp))
@@ -570,6 +584,11 @@ private fun NotePage(
                         onEraseStart = { viewModel.beginErase(page) },
                         onErase = { x, y, radius -> viewModel.eraseAt(page, x, y, radius) },
                         onEraseEnd = { viewModel.endErase(page) },
+                        onLassoFinished = { viewModel.selectWithLasso(page, it) },
+                        onSelectedTransformStart = { viewModel.beginSelectedStrokeTransform(page) },
+                        onSelectedMove = { dx, dy -> viewModel.moveSelectedStrokes(page, dx, dy) },
+                        onSelectedTransformEnd = { viewModel.endSelectedStrokeTransform(page) },
+                        onSelectedTransformCancel = { viewModel.cancelSelectedStrokeTransform(page) },
                         onImageSelected = { viewModel.selectImage(page, it) },
                         onImageTransformStart = { viewModel.beginImageTransform(page, it) },
                         onImageMove = { id, x, y -> viewModel.moveImage(page, id, x, y) },

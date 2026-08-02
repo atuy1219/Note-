@@ -18,3 +18,9 @@ Every save writes a temporary ZIP and atomically replaces the target `.atnote`. 
 ## Synchronization
 
 Drive files use `appProperties` for `noteId`, revision and SHA-256. The hidden app-data space prevents user edits outside the application. Remote and local folder records merge by stable folder ID and latest `updatedAt`. Equal-revision hash mismatches create a conflict copy rather than discarding either side.
+
+## `.atnote` format v3
+
+Version 3 stores each completed stroke as the gzip-compressed Protocol Buffers payload produced by `androidx.ink.storage.StrokeInputBatchSerialization`. The JSON manifest contains only stroke IDs, brush metadata, and an `ink/strokes/<id>.bin` entry reference. Version 2 Base64-in-JSON notes remain readable and migrate on the next save.
+
+Lasso input uses the AndroidX Ink dashed-line stock brush. Its input batch is closed with `MeshCreation.createClosedShape`, then intersected with each stroke mesh. Selected strokes can be moved, scaled, deleted, undone, and redone; transformations rebuild editable Ink input batches rather than rasterizing them.

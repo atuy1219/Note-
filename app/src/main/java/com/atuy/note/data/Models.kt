@@ -10,12 +10,16 @@ import androidx.compose.runtime.setValue
 import androidx.ink.brush.Brush
 import androidx.ink.brush.InputToolType
 import androidx.ink.brush.StockBrushes
-import androidx.ink.storage.StrokeInputBatchSerialization
+import androidx.ink.geometry.ImmutableAffineTransform
+import androidx.ink.geometry.Intersection.intersects
+import androidx.ink.strokes.createClosedShape
 import androidx.ink.strokes.MutableStrokeInputBatch
 import androidx.ink.strokes.Stroke
+import androidx.ink.strokes.StrokeInputBatch
+import androidx.ink.storage.StrokeInputBatchSerialization
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Serializable
-import java.io.ByteArrayInputStream
-import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 import kotlin.math.abs
@@ -27,6 +31,8 @@ const val NOTE_MIME_TYPE = "application/vnd.atuy.note+zip"
 const val NOTE_EXTENSION = ".atnote"
 const val PAGE_WIDTH = 1080f
 const val PAGE_HEIGHT = 1528f
+
+private val IDENTITY_TRANSFORM = ImmutableAffineTransform(1f, 0f, 0f, 0f, 1f, 0f)
 
 @Serializable
 data class LibraryIndex(
@@ -63,7 +69,7 @@ data class NoteSummary(
 
 @Serializable
 data class NoteDocument(
-    val formatVersion: Int = 2,
+    val formatVersion: Int = 3,
     val id: String = UUID.randomUUID().toString(),
     val title: String,
     val folderId: String? = null,
@@ -94,12 +100,16 @@ data class PageImage(
     val height: Float,
 )
 
+@OptIn(ExperimentalSerializationApi::class)
 @Serializable
 data class StoredStroke(
     val id: String = UUID.randomUUID().toString(),
     val brush: BrushSpec,
-    val encodedInputs: String,
-    val samples: List<InkSample>,
+    val inkEntry: String = "",
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val encodedInputs: String? = null,
+    @EncodeDefault(EncodeDefault.Mode.NEVER)
+    val samples: List<InkSample> = emptyList(),
 )
 
 @Serializable
@@ -120,12 +130,16 @@ data class BrushSpec(
 @Serializable
 enum class BrushKind { PRESSURE_PEN, MARKER }
 
-enum class ToolMode { PEN, ERASER, IMAGE }
+enum class ToolMode { PEN, ERASER, LASSO, IMAGE }
 enum class ScrollAxis { VERTICAL, HORIZONTAL }
 enum class NavigationGestureMode { ONE_FINGER, TWO_FINGER }
 enum class EraserMode { WHOLE_STROKE, PARTIAL }
 
-data class RuntimeStroke(val stored: StoredStroke, val stroke: Stroke)
+data class RuntimeStroke(
+    val stored: StoredStroke,
+    val stroke: Stroke,
+    val samples: List<InkSample> = stroke.inputs.toInkSamples(),
+)
 
 data class ImportedPageImage(
     val image: PageImage,
@@ -133,28 +147,37 @@ data class ImportedPageImage(
     val bitmap: Bitmap,
 )
 
-class PageSession(val source: PageDocument) {
+class PageSession(
+    val source: PageDocument,
+    inkEntries: Map<String, ByteArray> = emptyMap(),
+) {
     val id: String = source.id
     val width: Float = source.width
     val height: Float = source.height
     val pdfPageIndex: Int? = source.pdfPageIndex
     val strokes = mutableStateListOf<RuntimeStroke>()
     val images = mutableStateListOf<PageImage>()
+    val selectedStrokeIds = mutableStateListOf<String>()
     var selectedImageId by mutableStateOf<String?>(null)
     var contentVersion by mutableIntStateOf(0)
         private set
+
     private val undoStack = ArrayDeque<InkOperation>()
     private val redoStack = ArrayDeque<InkOperation>()
     private var eraseGestureBefore: List<RuntimeStroke>? = null
     private var imageTransformBefore: PageImage? = null
+    private var selectedStrokeTransformBefore: List<RuntimeStroke>? = null
 
     init {
-        source.strokes.mapNotNullTo(strokes) { it.toRuntimeOrNull() }
+        source.strokes.mapNotNullTo(strokes) { stored ->
+            stored.toRuntimeOrNull(inkEntries[stored.inkEntry])
+        }
         images.addAll(source.images)
     }
 
     fun add(runtime: RuntimeStroke, recordHistory: Boolean = true) {
         strokes += runtime
+        clearStrokeSelection()
         contentVersion++
         if (recordHistory) {
             undoStack.addLast(InkOperation.AddStroke(runtime))
@@ -164,6 +187,7 @@ class PageSession(val source: PageDocument) {
 
     fun beginEraseGesture() {
         if (eraseGestureBefore == null) eraseGestureBefore = strokes.toList()
+        clearStrokeSelection()
     }
 
     fun eraseAt(x: Float, y: Float, radius: Float, mode: EraserMode): Boolean = when (mode) {
@@ -181,10 +205,123 @@ class PageSession(val source: PageDocument) {
         return true
     }
 
+    fun selectWithLasso(lassoInputs: StrokeInputBatch): Int {
+        if (lassoInputs.size < 3) {
+            clearStrokeSelection()
+            return 0
+        }
+        val lassoShape = runCatching { lassoInputs.createClosedShape() }.getOrNull()
+        if (lassoShape == null) {
+            clearStrokeSelection()
+            return 0
+        }
+        val selected = strokes.filter { runtime ->
+            runCatching {
+                runtime.stroke.shape.intersects(lassoShape, IDENTITY_TRANSFORM, IDENTITY_TRANSFORM)
+            }.getOrDefault(false)
+        }.map { it.stored.id }
+        selectedStrokeIds.clear()
+        selectedStrokeIds.addAll(selected)
+        selectedImageId = null
+        contentVersion++
+        return selected.size
+    }
+
+    fun clearStrokeSelection() {
+        if (selectedStrokeIds.isEmpty()) return
+        selectedStrokeIds.clear()
+        contentVersion++
+    }
+
+    fun selectedStrokeBounds(): FloatArray? {
+        val selected = strokes.filter { it.stored.id in selectedStrokeIds }
+        if (selected.isEmpty()) return null
+        var minX = Float.POSITIVE_INFINITY
+        var minY = Float.POSITIVE_INFINITY
+        var maxX = Float.NEGATIVE_INFINITY
+        var maxY = Float.NEGATIVE_INFINITY
+        selected.asSequence().flatMap { it.samples.asSequence() }.forEach { sample ->
+            minX = min(minX, sample.x)
+            minY = min(minY, sample.y)
+            maxX = max(maxX, sample.x)
+            maxY = max(maxY, sample.y)
+        }
+        return if (minX.isFinite()) floatArrayOf(minX, minY, maxX, maxY) else null
+    }
+
+    fun isPointInsideStrokeSelection(x: Float, y: Float, padding: Float = 18f): Boolean {
+        val bounds = selectedStrokeBounds() ?: return false
+        return x >= bounds[0] - padding && x <= bounds[2] + padding &&
+            y >= bounds[1] - padding && y <= bounds[3] + padding
+    }
+
+    fun beginSelectedStrokeTransform(): Boolean {
+        if (selectedStrokeIds.isEmpty()) return false
+        selectedStrokeTransformBefore = strokes.toList()
+        return true
+    }
+
+    fun transformSelectedStrokes(dx: Float, dy: Float) {
+        val before = selectedStrokeTransformBefore ?: return
+        val selectedIds = selectedStrokeIds.toSet()
+        val transformed = before.map { runtime ->
+            if (runtime.stored.id in selectedIds) runtime.transformed(dx = dx, dy = dy) else runtime
+        }
+        replaceAllStrokes(transformed, preserveSelection = true)
+    }
+
+    fun endSelectedStrokeTransform(): Boolean {
+        val before = selectedStrokeTransformBefore ?: return false
+        selectedStrokeTransformBefore = null
+        val after = strokes.toList()
+        if (sameStrokeSequence(before, after)) return false
+        undoStack.addLast(InkOperation.ReplaceStrokes(before, after))
+        redoStack.clear()
+        return true
+    }
+
+    fun cancelSelectedStrokeTransform() {
+        val before = selectedStrokeTransformBefore ?: return
+        selectedStrokeTransformBefore = null
+        replaceAllStrokes(before, preserveSelection = true)
+    }
+
+    fun scaleSelectedStrokes(factor: Float): Boolean {
+        if (selectedStrokeIds.isEmpty()) return false
+        val bounds = selectedStrokeBounds() ?: return false
+        val centerX = (bounds[0] + bounds[2]) / 2f
+        val centerY = (bounds[1] + bounds[3]) / 2f
+        val selectedIds = selectedStrokeIds.toSet()
+        val before = strokes.toList()
+        val after = before.map { runtime ->
+            if (runtime.stored.id in selectedIds) {
+                runtime.transformed(scale = factor.coerceIn(0.2f, 5f), centerX = centerX, centerY = centerY)
+            } else runtime
+        }
+        if (sameStrokeSequence(before, after)) return false
+        replaceAllStrokes(after, preserveSelection = true)
+        undoStack.addLast(InkOperation.ReplaceStrokes(before, after))
+        redoStack.clear()
+        return true
+    }
+
+    fun deleteSelectedStrokes(): Boolean {
+        if (selectedStrokeIds.isEmpty()) return false
+        val ids = selectedStrokeIds.toSet()
+        val before = strokes.toList()
+        val after = before.filterNot { it.stored.id in ids }
+        if (before.size == after.size) return false
+        replaceAllStrokes(after)
+        undoStack.addLast(InkOperation.ReplaceStrokes(before, after))
+        redoStack.clear()
+        return true
+    }
+
     fun addImage(image: PageImage) {
         images += image
         contentVersion++
         selectedImageId = image.id
+        clearStrokeSelection()
         undoStack.addLast(InkOperation.AddImage(image))
         redoStack.clear()
     }
@@ -226,6 +363,7 @@ class PageSession(val source: PageDocument) {
 
     fun selectImage(id: String?) {
         selectedImageId = id?.takeIf { candidate -> images.any { it.id == candidate } }
+        if (selectedImageId != null) clearStrokeSelection()
     }
 
     fun beginImageTransform(id: String): Boolean {
@@ -308,9 +446,13 @@ class PageSession(val source: PageDocument) {
         images = images.toList(),
     )
 
+    fun encodedInkEntries(): Map<String, ByteArray> = strokes.associate { runtime ->
+        runtime.stored.inkEntry to StrokeInputBatchSerialization.encode(runtime.stroke.inputs)
+    }
+
     private fun eraseWholeStrokes(x: Float, y: Float, radius: Float): Boolean {
         val before = strokes.size
-        strokes.removeAll { runtime -> polylineIntersectsCircle(runtime.stored.samples, x, y, radius) }
+        strokes.removeAll { runtime -> polylineIntersectsCircle(runtime.samples, x, y, radius) }
         val changed = strokes.size != before
         if (changed) contentVersion++
         return changed
@@ -320,13 +462,13 @@ class PageSession(val source: PageDocument) {
         var changed = false
         val replacement = mutableListOf<RuntimeStroke>()
         for (runtime in strokes) {
-            val split = splitSamplesOutsideCircle(runtime.stored.samples, x, y, radius)
+            val split = splitSamplesOutsideCircle(runtime.samples, x, y, radius)
             if (split == null) {
                 replacement += runtime
                 continue
             }
             changed = true
-            split.mapNotNullTo(replacement) { samples -> runtime.stored.runtimeWithSamples(samples) }
+            split.mapNotNullTo(replacement) { samples -> runtime.runtimeWithSamples(samples) }
         }
         if (changed) replaceAllStrokes(replacement)
         return changed
@@ -340,9 +482,11 @@ class PageSession(val source: PageDocument) {
         }
     }
 
-    private fun replaceAllStrokes(values: List<RuntimeStroke>) {
+    private fun replaceAllStrokes(values: List<RuntimeStroke>, preserveSelection: Boolean = false) {
         strokes.clear()
         strokes.addAll(values)
+        if (!preserveSelection) selectedStrokeIds.clear()
+        else selectedStrokeIds.retainAll(values.mapTo(mutableSetOf()) { it.stored.id })
         contentVersion++
     }
 }
@@ -361,6 +505,7 @@ class NoteSession(
     val sourcePdfFile: File?,
     val imageFiles: MutableMap<String, File> = mutableMapOf(),
     val imageBitmaps: MutableMap<String, Bitmap> = mutableMapOf(),
+    inkEntries: Map<String, ByteArray> = emptyMap(),
 ) {
     val id: String = document.id
     val createdAt: Long = document.createdAt
@@ -371,13 +516,14 @@ class NoteSession(
     var dirty by mutableStateOf(false)
     var activePageIndex by mutableIntStateOf(0)
     val pages = mutableStateListOf<PageSession>().apply {
-        addAll(document.pages.map(::PageSession))
+        addAll(document.pages.map { PageSession(it, inkEntries) })
     }
 
     fun toDocument(nextRevision: Boolean): NoteDocument {
         val now = System.currentTimeMillis()
         val revisionValue = if (nextRevision) revision + 1 else revision
         return NoteDocument(
+            formatVersion = 3,
             id = id,
             title = title,
             folderId = folderId,
@@ -387,6 +533,10 @@ class NoteSession(
             sourcePdfEntry = sourcePdfFile?.let { "background/source.pdf" },
             pages = pages.map { it.toDocument() },
         )
+    }
+
+    fun encodedInkEntries(): Map<String, ByteArray> = buildMap {
+        pages.forEach { putAll(it.encodedInkEntries()) }
     }
 }
 
@@ -398,23 +548,32 @@ fun BrushSpec.toBrush(): Brush {
     return Brush.createWithColorIntArgb(family, colorArgb, size, epsilon)
 }
 
-fun Stroke.toStoredStroke(spec: BrushSpec, samples: List<InkSample>): StoredStroke {
-    val output = ByteArrayOutputStream()
-    StrokeInputBatchSerialization.encode(inputs, output)
-    return StoredStroke(
-        brush = spec,
-        encodedInputs = Base64.encodeToString(output.toByteArray(), Base64.NO_WRAP),
-        samples = samples,
-    )
+fun Stroke.toRuntimeStroke(spec: BrushSpec): RuntimeStroke {
+    val id = UUID.randomUUID().toString()
+    val stored = StoredStroke(id = id, brush = spec, inkEntry = "ink/strokes/$id.bin")
+    return RuntimeStroke(stored = stored, stroke = this)
 }
 
-fun StoredStroke.toRuntimeOrNull(): RuntimeStroke? = runCatching {
-    val decoded = Base64.decode(encodedInputs, Base64.NO_WRAP)
-    val inputs = StrokeInputBatchSerialization.decode(ByteArrayInputStream(decoded))
-    RuntimeStroke(this, Stroke(brush.toBrush(), inputs))
+fun StoredStroke.toRuntimeOrNull(officialBytes: ByteArray?): RuntimeStroke? = runCatching {
+    val decoded = when {
+        officialBytes != null -> StrokeInputBatchSerialization.decode(officialBytes)
+        !encodedInputs.isNullOrBlank() -> {
+            val legacyBytes = Base64.decode(encodedInputs, Base64.NO_WRAP)
+            StrokeInputBatchSerialization.decode(legacyBytes)
+        }
+        else -> error("Missing Ink Storage entry for stroke $id")
+    }
+    val normalizedEntry = inkEntry.ifBlank { "ink/strokes/$id.bin" }
+    val normalized = copy(
+        inkEntry = normalizedEntry,
+        encodedInputs = null,
+        samples = emptyList(),
+    )
+    val runtimeSamples = if (samples.isNotEmpty()) samples else decoded.toInkSamples()
+    RuntimeStroke(normalized, Stroke(brush.toBrush(), decoded), runtimeSamples)
 }.getOrNull()
 
-private fun StoredStroke.runtimeWithSamples(rawSamples: List<InkSample>): RuntimeStroke? = runCatching {
+private fun RuntimeStroke.runtimeWithSamples(rawSamples: List<InkSample>): RuntimeStroke? = runCatching {
     val samples = sanitizeSamples(rawSamples)
     check(samples.size >= 2) { "Not enough stroke samples" }
     val batch = MutableStrokeInputBatch()
@@ -427,9 +586,52 @@ private fun StoredStroke.runtimeWithSamples(rawSamples: List<InkSample>): Runtim
             pressure = sample.pressure.coerceIn(0f, 1f),
         )
     }
-    val stroke = Stroke(brush.toBrush(), batch)
-    RuntimeStroke(stroke.toStoredStroke(brush, samples), stroke)
+    val id = UUID.randomUUID().toString()
+    val metadata = StoredStroke(id = id, brush = stored.brush, inkEntry = "ink/strokes/$id.bin")
+    RuntimeStroke(metadata, Stroke(stored.brush.toBrush(), batch), samples)
 }.getOrNull()
+
+private fun RuntimeStroke.transformed(
+    dx: Float = 0f,
+    dy: Float = 0f,
+    scale: Float = 1f,
+    centerX: Float = 0f,
+    centerY: Float = 0f,
+): RuntimeStroke {
+    val batch = MutableStrokeInputBatch()
+    for (index in 0 until stroke.inputs.size) {
+        val input = stroke.inputs[index]
+        val transformedX = centerX + (input.x - centerX) * scale + dx
+        val transformedY = centerY + (input.y - centerY) * scale + dy
+        if (input.hasPressure) {
+            batch.add(
+                type = input.toolType,
+                x = transformedX,
+                y = transformedY,
+                elapsedTimeMillis = input.elapsedTimeMillis,
+                pressure = input.pressure,
+            )
+        } else {
+            batch.add(
+                type = input.toolType,
+                x = transformedX,
+                y = transformedY,
+                elapsedTimeMillis = input.elapsedTimeMillis,
+            )
+        }
+    }
+    val nextStroke = Stroke(stored.brush.toBrush(), batch)
+    return RuntimeStroke(stored, nextStroke)
+}
+
+fun StrokeInputBatch.toInkSamples(): List<InkSample> = List(size) { index ->
+    val input = this[index]
+    InkSample(
+        x = input.x,
+        y = input.y,
+        pressure = if (input.hasPressure) input.pressure else 1f,
+    )
+}
 
 private fun sanitizeSamples(samples: List<InkSample>): List<InkSample> {
     if (samples.isEmpty()) return emptyList()
@@ -444,7 +646,9 @@ private fun sanitizeSamples(samples: List<InkSample>): List<InkSample> {
 }
 
 private fun sameStrokeSequence(a: List<RuntimeStroke>, b: List<RuntimeStroke>): Boolean =
-    a.size == b.size && a.indices.all { index -> a[index].stored.id == b[index].stored.id }
+    a.size == b.size && a.indices.all { index ->
+        a[index].stored.id == b[index].stored.id && a[index].samples == b[index].samples
+    }
 
 private fun polylineIntersectsCircle(samples: List<InkSample>, cx: Float, cy: Float, radius: Float): Boolean {
     if (samples.isEmpty()) return false

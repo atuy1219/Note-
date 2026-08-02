@@ -11,6 +11,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.ink.strokes.Stroke
 import com.atuy.note.data.BrushSpec
 import com.atuy.note.data.EraserMode
 import com.atuy.note.data.FolderRecord
@@ -130,7 +131,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val imported = repository.importImage(session, page, uri)
                 session.imageFiles[imported.image.entryName] = imported.entryFile
                 session.imageBitmaps[imported.image.entryName] = imported.bitmap
-                page.addImage(imported.image)
+                 page.addImage(imported.image)
                 toolMode = ToolMode.IMAGE
                 markDirty(session)
             }
@@ -176,6 +177,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun setTool(mode: ToolMode) {
         toolMode = mode
         if (mode != ToolMode.IMAGE) activePage?.selectImage(null)
+        if (mode != ToolMode.LASSO) activePage?.clearStrokeSelection()
     }
 
     fun toggleEraser() {
@@ -219,6 +221,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun beginErase(page: PageSession) { page.beginEraseGesture() }
     fun eraseAt(page: PageSession, x: Float, y: Float, radius: Float) { page.eraseAt(x, y, radius, eraserMode) }
     fun endErase(page: PageSession) { if (page.endEraseGesture()) markDirty() }
+
+    fun selectWithLasso(page: PageSession, lasso: Stroke) {
+        val count = page.selectWithLasso(lasso.inputs)
+        statusMessage = if (count == 0) "選択なし" else "$count 本の線を選択"
+    }
+
+    fun beginSelectedStrokeTransform(page: PageSession): Boolean = page.beginSelectedStrokeTransform()
+    fun moveSelectedStrokes(page: PageSession, dx: Float, dy: Float) { page.transformSelectedStrokes(dx, dy) }
+    fun endSelectedStrokeTransform(page: PageSession) { if (page.endSelectedStrokeTransform()) markDirty() }
+    fun cancelSelectedStrokeTransform(page: PageSession) { page.cancelSelectedStrokeTransform() }
+
+    fun scaleSelectedStrokes(factor: Float) {
+        val page = activePage ?: return
+        if (page.scaleSelectedStrokes(factor)) markDirty()
+    }
+
+    fun deleteSelectedStrokes() {
+        val page = activePage ?: return
+        if (page.deleteSelectedStrokes()) markDirty()
+    }
 
     fun selectImage(page: PageSession, imageId: String?) {
         page.selectImage(imageId)
