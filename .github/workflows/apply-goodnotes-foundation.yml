@@ -13,53 +13,11 @@ permissions:
 jobs:
   apply-test-push:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
-
     steps:
       - uses: actions/checkout@v4
         with:
           ref: agent/goodnotes-foundation
-          fetch-depth: 0
-
-      - name: Apply verified implementation patch
-        shell: bash
+      - name: Verify patch chunks
         run: |
-          cat .github/patch/goodnotes.part-* > /tmp/goodnotes-foundation.patch.gz.b64
-          echo '75da88d1221dded01d9ea25748c6f81801522a86aa635f51dcdb877fcffcba94  /tmp/goodnotes-foundation.patch.gz.b64' | sha256sum -c -
-          base64 -d /tmp/goodnotes-foundation.patch.gz.b64 > /tmp/goodnotes-foundation.patch.gz
-          echo 'a61acb1a0461a77a0cc19bfacbe1bd07fce7a176e69549d65a5cd56c4a6b5d07  /tmp/goodnotes-foundation.patch.gz' | sha256sum -c -
-          gzip -d /tmp/goodnotes-foundation.patch.gz
-          echo '5a30ae5593c802ec595a0dca952a9f368c30c345a4f617f4b3a2804c3f6886a0  /tmp/goodnotes-foundation.patch' | sha256sum -c -
-          git apply --index /tmp/goodnotes-foundation.patch
-          rm -rf .github/patch .github/workflows/apply-goodnotes-foundation.yml
-          git add -A
-          git diff --cached --check
-
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK 35
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.11.1'
-
-      - name: Build and test
-        shell: bash
-        run: gradle :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest --stacktrace
-
-      - name: Commit and push
-        shell: bash
-        run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git commit -m 'Build Goodnotes-style note app foundation'
-          git push origin HEAD:agent/goodnotes-foundation
+          sha256sum .github/patch/goodnotes.part-*
+          exit 1
