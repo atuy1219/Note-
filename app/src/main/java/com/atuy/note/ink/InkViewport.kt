@@ -28,7 +28,7 @@ internal data class ViewportTransform(
  * Owns the page camera so PDF rendering, finished ink, and input inversion all use one transform.
  */
 internal class InkViewport {
-    var zoom: Float = MIN_ZOOM
+    var zoom: Float = DEFAULT_ZOOM
         private set
     var panX: Float = 0f
         private set
@@ -36,7 +36,7 @@ internal class InkViewport {
         private set
 
     fun reset() {
-        zoom = MIN_ZOOM
+        zoom = DEFAULT_ZOOM
         panX = 0f
         panY = 0f
     }
@@ -97,11 +97,6 @@ internal class InkViewport {
         viewWidth: Float,
         viewHeight: Float,
     ) {
-        if (zoom <= MIN_ZOOM + ZOOM_RESET_EPSILON) {
-            reset()
-            return
-        }
-
         val layout = layout(pageWidth, pageHeight, viewWidth, viewHeight)
         val scaledWidth = pageWidth * layout.fitScale * zoom
         val scaledHeight = pageHeight * layout.fitScale * zoom
@@ -144,9 +139,9 @@ internal class InkViewport {
     )
 
     private companion object {
-        const val MIN_ZOOM = 1f
+        const val DEFAULT_ZOOM = 1f
+        const val MIN_ZOOM = 0.35f
         const val MAX_ZOOM = 5f
         const val ZOOM_EPSILON = 0.0001f
-        const val ZOOM_RESET_EPSILON = 0.001f
     }
 }

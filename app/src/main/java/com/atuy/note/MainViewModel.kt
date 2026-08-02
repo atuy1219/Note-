@@ -67,6 +67,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val lassoCoverageMode: LassoCoverageMode
         get() = lassoCoverageModeState
 
+    private var circleToLassoEnabledState by mutableStateOf(
+        preferences.getBoolean("circle_to_lasso", true),
+    )
+    val circleToLassoEnabled: Boolean
+        get() = circleToLassoEnabledState
+
     var busy by mutableStateOf(false)
         private set
     var statusMessage by mutableStateOf<String?>(null)
@@ -179,6 +185,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun showLibrary() { activeNoteId = null }
 
+    fun renameActiveNote(name: String) {
+        val session = activeSession ?: return
+        val normalized = name.trim().ifBlank { "Untitled" }
+        if (session.title == normalized) return
+        session.title = normalized
+        markDirty(session)
+    }
+
+    fun deleteActiveNote() {
+        val session = activeSession ?: return
+        viewModelScope.launch {
+            runBusy {
+                saveJobs.remove(session.id)?.cancel()
+                library = repository.deleteNote(session.id, library)
+                session.imageBitmaps.values.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }
+                val index = openTabs.indexOfFirst { it.id == session.id }
+                openTabs.removeAll { it.id == session.id }
+                activeNoteId = openTabs.getOrNull(index.coerceAtMost(openTabs.lastIndex))?.id
+            }
+        }
+    }
+
     fun setTool(mode: ToolMode) {
         toolMode = mode
         if (mode != ToolMode.IMAGE) activePage?.selectImage(null)
@@ -249,12 +277,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         setTool(ToolMode.LASSO)
     }
 
-    fun activatePage(index: Int) { activeSession?.activePageIndex = index.coerceAtLeast(0) }
+    fun setCircleToLassoEnabled(enabled: Boolean) {
+        circleToLassoEnabledState = enabled
+        preferences.edit().putBoolean("circle_to_lasso", enabled).apply()
+    }
+
+    fun activatePage(index: Int) {
+        val session = activeSession ?: return
+        session.activePageIndex = index.coerceIn(0, session.pages.lastIndex.coerceAtLeast(0))
+    }
 
     fun addPage() {
         val session = activeSession ?: return
-        session.pages += PageSession(com.atuy.note.data.PageDocument())
-        session.activePageIndex = session.pages.lastIndex
+        val insertAt = (session.activePageIndex + 1).coerceIn(0, session.pages.size)
+        val template = activePage
+        session.pages.add(
+            insertAt,
+            PageSession(
+                com.atuy.note.data.PageDocument(
+                    width = template?.width ?: com.atuy.note.data.PAGE_WIDTH,
+                    height = template?.height ?: com.atuy.note.data.PAGE_HEIGHT,
+                ),
+            ),
+        )
+        session.activePageIndex = insertAt
+        markDirty(session)
+    }
+
+    fun duplicatePage(index: Int) {
+        val session = activeSession ?: return
+        val source = session.pages.getOrNull(index) ?: return
+        val insertAt = index + 1
+        session.pages.add(insertAt, source.duplicate())
+        session.activePageIndex = insertAt
+        markDirty(session)
+    }
+
+    fun deletePage(index: Int) {
+        val session = activeSession ?: return
+        if (session.pages.size <= 1) {
+            statusMessage = "最後のページは削除できません"
+            return
+        }
+        if (index !in session.pages.indices) return
+        session.pages.removeAt(index)
+        session.activePageIndex = session.activePageIndex.coerceIn(0, session.pages.lastIndex)
+        markDirty(session)
+    }
+
+    fun movePage(index: Int, delta: Int) {
+        val session = activeSession ?: return
+        val target = index + delta
+        if (index !in session.pages.indices || target !in session.pages.indices) return
+        val page = session.pages.removeAt(index)
+        session.pages.add(target, page)
+        session.activePageIndex = target
         markDirty(session)
     }
 
@@ -270,6 +347,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectWithLasso(page: PageSession, lasso: Stroke) {
         val count = page.selectWithLasso(lasso.inputs, lassoCoverageMode)
         statusMessage = if (count == 0) "選択なし" else "$count 本の線を選択"
+    }
+
+    fun convertCircleStrokeToLasso(page: PageSession, strokeId: String, lasso: Stroke) {
+        if (!page.consumeStrokeForLasso(strokeId)) return
+        val count = page.selectWithLasso(lasso.inputs, lassoCoverageMode)
+        toolMode = ToolMode.LASSO
+        markDirty()
+        statusMessage = if (count == 0) "囲みを投げ縄に変換しました（選択なし）" else "$count 本の線を選択"
     }
 
     fun beginSelectedStrokeTransform(page: PageSession): Boolean = page.beginSelectedStrokeTransform()
@@ -350,6 +435,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     suspend fun renderPdfPage(session: NoteSession, page: PageSession, targetWidth: Int): Bitmap? =
         repository.renderPdfPage(session, page, targetWidth)
+
+    suspend fun renderPagePreview(session: NoteSession, page: PageSession, targetWidth: Int): Bitmap =
+        repository.renderPagePreview(session, page, targetWidth)
 
     fun syncWithDrive(accessToken: String) {
         viewModelScope.launch {

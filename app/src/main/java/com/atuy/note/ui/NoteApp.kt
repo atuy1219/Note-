@@ -30,6 +30,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -41,15 +42,22 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudSync
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.DeleteOutline
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.material3.AlertDialog
@@ -57,6 +65,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
@@ -77,6 +87,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -97,6 +108,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import com.atuy.note.MainViewModel
 import com.atuy.note.data.BrushKind
 import com.atuy.note.data.CustomBrushSpec
@@ -162,35 +174,57 @@ private fun LibraryScreen(
 ) {
     var createNote by remember { mutableStateOf(false) }
     var createFolder by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    val normalizedQuery = query.trim()
+    val folders = if (normalizedQuery.isBlank()) {
+        viewModel.childFolders
+    } else {
+        viewModel.childFolders.filter { it.name.contains(normalizedQuery, ignoreCase = true) }
+    }
+    val notes = if (normalizedQuery.isBlank()) {
+        viewModel.visibleNotes
+    } else {
+        viewModel.visibleNotes.filter { it.title.contains(normalizedQuery, ignoreCase = true) }
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(viewModel.currentFolder?.name ?: "Note", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(
-                            "${viewModel.visibleNotes.size} notes",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                },
-                navigationIcon = {
-                    if (viewModel.currentFolderId != null) {
-                        IconButton(onClick = viewModel::navigateUpFolder) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "Parent folder")
+            Column {
+                TopAppBar(
+                    title = {
+                        Column {
+                            Text(viewModel.currentFolder?.name ?: "Note", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                "${viewModel.visibleNotes.size} notes",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
-                    }
-                },
-                actions = {
-                    IconButton(onClick = onSyncDrive) { Icon(Icons.Default.CloudSync, "Sync with Google Drive") }
-                    IconButton(onClick = { createFolder = true }) { Icon(Icons.Default.CreateNewFolder, "New folder") }
-                    IconButton(onClick = onImportPdf) { Icon(Icons.Default.PictureAsPdf, "Import PDF") }
-                    IconButton(onClick = { createNote = true }) { Icon(Icons.Default.Add, "New note") }
-                },
-            )
+                    },
+                    navigationIcon = {
+                        if (viewModel.currentFolderId != null) {
+                            IconButton(onClick = viewModel::navigateUpFolder) {
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Parent folder")
+                            }
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = onSyncDrive) { Icon(Icons.Default.CloudSync, "Sync with Google Drive") }
+                        IconButton(onClick = { createFolder = true }) { Icon(Icons.Default.CreateNewFolder, "New folder") }
+                        IconButton(onClick = onImportPdf) { Icon(Icons.Default.PictureAsPdf, "Import PDF") }
+                        IconButton(onClick = { createNote = true }) { Icon(Icons.Default.Add, "New note") }
+                    },
+                )
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                    singleLine = true,
+                    leadingIcon = { Icon(Icons.Default.Search, null) },
+                    placeholder = { Text("ノートとフォルダーを検索") },
+                )
+            }
         },
     ) { padding ->
         BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {
@@ -203,8 +237,8 @@ private fun LibraryScreen(
                     )
                     VerticalDivider(Modifier.fillMaxHeight().width(1.dp))
                     LibraryGrid(
-                        folders = viewModel.childFolders,
-                        notes = viewModel.visibleNotes,
+                        folders = folders,
+                        notes = notes,
                         onFolder = { viewModel.enterFolder(it.id) },
                         onNote = { viewModel.openNote(it.id) },
                         modifier = Modifier.weight(1f),
@@ -212,8 +246,8 @@ private fun LibraryScreen(
                 }
             } else {
                 LibraryGrid(
-                    folders = viewModel.childFolders,
-                    notes = viewModel.visibleNotes,
+                    folders = folders,
+                    notes = notes,
                     onFolder = { viewModel.enterFolder(it.id) },
                     onNote = { viewModel.openNote(it.id) },
                     modifier = Modifier.fillMaxSize(),
@@ -349,12 +383,26 @@ private fun NoteCard(note: NoteSummary, onClick: () -> Unit) {
 private fun EditorScreen(viewModel: MainViewModel, onImportImage: () -> Unit, snackbar: SnackbarHostState) {
     val active = viewModel.activeSession ?: return
     val selectedTab = viewModel.openTabs.indexOfFirst { it.id == active.id }.coerceAtLeast(0)
+    var showPages by remember(active.id) { mutableStateOf(false) }
+    var showMenu by remember(active.id) { mutableStateOf(false) }
+    var renameNote by remember(active.id) { mutableStateOf(false) }
+    var deleteNote by remember(active.id) { mutableStateOf(false) }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             Column {
                 TopAppBar(
-                    title = { Text(active.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    title = {
+                        Column {
+                            Text(active.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                "${active.pages.size}ページ • ${if (active.dirty) "保存中" else "保存済み"}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
                     navigationIcon = {
                         IconButton(onClick = viewModel::showLibrary) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, "Library")
@@ -363,6 +411,7 @@ private fun EditorScreen(viewModel: MainViewModel, onImportImage: () -> Unit, sn
                     actions = {
                         IconButton(onClick = viewModel::undo) { Icon(Icons.AutoMirrored.Filled.Undo, "Undo") }
                         IconButton(onClick = viewModel::redo) { Icon(Icons.AutoMirrored.Filled.Redo, "Redo") }
+                        IconButton(onClick = { showPages = true }) { Icon(Icons.Default.GridView, "ページ一覧") }
                         IconButton(onClick = viewModel::addPage) { Icon(Icons.Default.Add, "Add page") }
                         IconButton(onClick = viewModel::toggleScrollAxis) {
                             Icon(
@@ -371,6 +420,27 @@ private fun EditorScreen(viewModel: MainViewModel, onImportImage: () -> Unit, sn
                             )
                         }
                         IconButton(onClick = viewModel::saveActive) { Icon(Icons.Default.Save, "Save") }
+                        Box {
+                            IconButton(onClick = { showMenu = true }) { Icon(Icons.Default.MoreVert, "その他") }
+                            DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("名前を変更") },
+                                    leadingIcon = { Icon(Icons.Default.Edit, null) },
+                                    onClick = {
+                                        showMenu = false
+                                        renameNote = true
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("ノートを削除") },
+                                    leadingIcon = { Icon(Icons.Default.DeleteOutline, null) },
+                                    onClick = {
+                                        showMenu = false
+                                        deleteNote = true
+                                    },
+                                )
+                            }
+                        }
                     },
                 )
                 ScrollableTabRow(selectedTabIndex = selectedTab, edgePadding = 8.dp) {
@@ -402,6 +472,38 @@ private fun EditorScreen(viewModel: MainViewModel, onImportImage: () -> Unit, sn
             HorizontalDivider()
             Pages(viewModel, active, Modifier.weight(1f))
         }
+    }
+
+    if (showPages) {
+        PageOverviewDialog(
+            viewModel = viewModel,
+            session = active,
+            onDismiss = { showPages = false },
+            onOpenPage = { index ->
+                viewModel.activatePage(index)
+                showPages = false
+            },
+        )
+    }
+    if (renameNote) {
+        NameDialog("ノート名を変更", active.title, onDismiss = { renameNote = false }) {
+            renameNote = false
+            viewModel.renameActiveNote(it)
+        }
+    }
+    if (deleteNote) {
+        AlertDialog(
+            onDismissRequest = { deleteNote = false },
+            title = { Text("ノートを削除") },
+            text = { Text("「${active.title}」を端末から完全に削除します。") },
+            confirmButton = {
+                Button(onClick = {
+                    deleteNote = false
+                    viewModel.deleteActiveNote()
+                }) { Text("削除") }
+            },
+            dismissButton = { TextButton(onClick = { deleteNote = false }) { Text("キャンセル") } },
+        )
     }
 }
 
@@ -519,6 +621,14 @@ private fun InkToolbar(viewModel: MainViewModel, onImportImage: () -> Unit) {
 
         VerticalDivider(Modifier.height(32.dp).width(1.dp))
         FilterChip(
+            selected = viewModel.circleToLassoEnabled,
+            onClick = { viewModel.setCircleToLassoEnabled(!viewModel.circleToLassoEnabled) },
+            label = { Text("囲み→投げ縄") },
+            leadingIcon = { Icon(Icons.Default.Gesture, null, Modifier.size(18.dp)) },
+        )
+
+        VerticalDivider(Modifier.height(32.dp).width(1.dp))
+        FilterChip(
             selected = viewModel.navigationGestureMode == NavigationGestureMode.ONE_FINGER,
             onClick = { viewModel.setNavigationGestureMode(NavigationGestureMode.ONE_FINGER) },
             label = { Text("指1本で移動") },
@@ -621,6 +731,9 @@ private fun Pages(viewModel: MainViewModel, session: NoteSession, modifier: Modi
         when (viewModel.scrollAxis) {
             ScrollAxis.VERTICAL -> {
                 val state = rememberLazyListState()
+                LaunchedEffect(session.activePageIndex, session.pages.size) {
+                    if (session.pages.isNotEmpty()) state.animateScrollToItem(session.activePageIndex.coerceIn(0, session.pages.lastIndex))
+                }
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     state = state,
@@ -643,6 +756,9 @@ private fun Pages(viewModel: MainViewModel, session: NoteSession, modifier: Modi
             }
             ScrollAxis.HORIZONTAL -> {
                 val state = rememberLazyListState()
+                LaunchedEffect(session.activePageIndex, session.pages.size) {
+                    if (session.pages.isNotEmpty()) state.animateScrollToItem(session.activePageIndex.coerceIn(0, session.pages.lastIndex))
+                }
                 LazyRow(
                     modifier = Modifier.fillMaxSize(),
                     state = state,
@@ -698,12 +814,14 @@ private fun NotePage(
                         toolProvider = { viewModel.toolMode },
                         brushProvider = { viewModel.brushSpec },
                         navigationGestureProvider = { viewModel.navigationGestureMode },
+                        circleToLassoEnabledProvider = { viewModel.circleToLassoEnabled },
                         onNavigationPan = onNavigationPan,
                         onStrokeAdded = { viewModel.addStroke(page, it) },
                         onEraseStart = { viewModel.beginErase(page) },
                         onErase = { x, y, radius -> viewModel.eraseAt(page, x, y, radius) },
                         onEraseEnd = { viewModel.endErase(page) },
                         onLassoFinished = { viewModel.selectWithLasso(page, it) },
+                        onCircleHoldLasso = { strokeId, stroke -> viewModel.convertCircleStrokeToLasso(page, strokeId, stroke) },
                         onSelectedTransformStart = { viewModel.beginSelectedStrokeTransform(page) },
                         onSelectedMove = { dx, dy -> viewModel.moveSelectedStrokes(page, dx, dy) },
                         onSelectedTransformEnd = { viewModel.endSelectedStrokeTransform(page) },
@@ -718,6 +836,101 @@ private fun NotePage(
                 },
                 modifier = Modifier.fillMaxWidth().aspectRatio(page.width / page.height),
             )
+        }
+    }
+}
+
+@Composable
+private fun PageOverviewDialog(
+    viewModel: MainViewModel,
+    session: NoteSession,
+    onDismiss: () -> Unit,
+    onOpenPage: (Int) -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            modifier = Modifier.fillMaxWidth().fillMaxHeight(0.9f),
+            shape = MaterialTheme.shapes.extraLarge,
+            tonalElevation = 8.dp,
+        ) {
+            Column(Modifier.fillMaxSize().padding(16.dp)) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column {
+                        Text("ページ一覧", style = MaterialTheme.typography.headlineSmall)
+                        Text("${session.pages.size}ページ", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Row {
+                        IconButton(onClick = viewModel::addPage) { Icon(Icons.Default.Add, "ページを追加") }
+                        IconButton(onClick = onDismiss) { Icon(Icons.Default.Close, "閉じる") }
+                    }
+                }
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(180.dp),
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    itemsIndexed(session.pages, key = { _, page -> page.id }) { index, page ->
+                        val preview by produceState<Bitmap?>(initialValue = null, session.id, page.id, page.contentVersion) {
+                            value = viewModel.renderPagePreview(session, page, 360)
+                        }
+                        DisposableEffect(preview) {
+                            onDispose { preview?.let { if (!it.isRecycled) it.recycle() } }
+                        }
+                        Card(
+                            onClick = { onOpenPage(index) },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (index == session.activePageIndex) {
+                                    MaterialTheme.colorScheme.secondaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceContainer
+                                },
+                            ),
+                        ) {
+                            Column(Modifier.fillMaxWidth().padding(8.dp)) {
+                                Box(
+                                    Modifier.fillMaxWidth().aspectRatio(page.width / page.height).background(Color.White),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    if (preview != null) {
+                                        androidx.compose.foundation.Image(
+                                            bitmap = preview!!.asImageBitmap(),
+                                            contentDescription = "Page ${index + 1}",
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = ContentScale.Fit,
+                                        )
+                                    } else {
+                                        CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
+                                    }
+                                }
+                                Text("Page ${index + 1}", modifier = Modifier.padding(top = 8.dp), fontWeight = FontWeight.SemiBold)
+                                Row(
+                                    Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceEvenly,
+                                ) {
+                                    IconButton(enabled = index > 0, onClick = { viewModel.movePage(index, -1) }) {
+                                        Icon(Icons.Default.KeyboardArrowUp, "前へ")
+                                    }
+                                    IconButton(enabled = index < session.pages.lastIndex, onClick = { viewModel.movePage(index, 1) }) {
+                                        Icon(Icons.Default.KeyboardArrowDown, "後へ")
+                                    }
+                                    IconButton(onClick = { viewModel.duplicatePage(index) }) {
+                                        Icon(Icons.Default.ContentCopy, "複製")
+                                    }
+                                    IconButton(enabled = session.pages.size > 1, onClick = { viewModel.deletePage(index) }) {
+                                        Icon(Icons.Default.DeleteOutline, "削除")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

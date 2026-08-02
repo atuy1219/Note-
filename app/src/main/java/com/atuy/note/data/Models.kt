@@ -209,6 +209,43 @@ class PageSession(
         }
     }
 
+    fun consumeStrokeForLasso(strokeId: String): Boolean {
+        val index = strokes.indexOfFirst { it.stored.id == strokeId }
+        if (index < 0) return false
+        strokes.removeAt(index)
+        selectedStrokeIds.remove(strokeId)
+        contentVersion++
+        val latest = undoStack.lastOrNull()
+        if (latest is InkOperation.AddStroke && latest.stroke.stored.id == strokeId) {
+            undoStack.removeLast()
+        }
+        redoStack.clear()
+        return true
+    }
+
+    fun duplicate(): PageSession {
+        val copy = PageSession(
+            PageDocument(
+                width = width,
+                height = height,
+                pdfPageIndex = pdfPageIndex,
+            ),
+        )
+        strokes.forEach { runtime ->
+            val id = UUID.randomUUID().toString()
+            copy.add(
+                RuntimeStroke(
+                    stored = runtime.stored.copy(id = id, inkEntry = "ink/strokes/$id.bin"),
+                    stroke = runtime.stroke,
+                    samples = runtime.samples,
+                ),
+                recordHistory = false,
+            )
+        }
+        copy.images.addAll(images.map { image -> image.copy(id = UUID.randomUUID().toString()) })
+        return copy
+    }
+
     fun beginEraseGesture() {
         if (eraseGestureBefore == null) eraseGestureBefore = strokes.toList()
         clearStrokeSelection()

@@ -28,6 +28,9 @@ import com.atuy.note.data.RuntimeStroke
 import com.atuy.note.data.ToolMode
 import com.atuy.note.data.toBrush
 import com.atuy.note.data.toRuntimeStroke
+import kotlin.math.hypot
+import kotlin.math.max
+import kotlin.math.min
 
 class InkPageView(context: Context) : FrameLayout(context) {
     private val dryView = DryInkView(context)
@@ -66,6 +69,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private val pendingViewportMutations = ArrayDeque<ViewportMutation>()
     private val strokeBrushSpecs = mutableMapOf<InProgressStrokeId, BrushSpec>()
     private val lassoStrokeIds = mutableSetOf<InProgressStrokeId>()
+    private val pendingCircleLasso = mutableMapOf<String, Runnable>()
     private val lassoBrush = Brush.createWithColorIntArgb(
         StockBrushes.dashedLine(),
         0xFF1976D2.toInt(),
@@ -79,12 +83,14 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private var toolProvider: () -> ToolMode = { ToolMode.PEN }
     private var brushProvider: () -> BrushSpec = { BrushSpec() }
     private var navigationGestureProvider: () -> NavigationGestureMode = { NavigationGestureMode.ONE_FINGER }
+    private var circleToLassoEnabledProvider: () -> Boolean = { false }
     private var onNavigationPan: (Float, Float) -> Unit = { _, _ -> }
     private var onStrokeAdded: (RuntimeStroke) -> Unit = {}
     private var onEraseStart: () -> Unit = {}
     private var onErase: (Float, Float, Float) -> Unit = { _, _, _ -> }
     private var onEraseEnd: () -> Unit = {}
     private var onLassoFinished: (Stroke) -> Unit = {}
+    private var onCircleHoldLasso: (String, Stroke) -> Unit = { _, _ -> }
     private var onSelectedTransformStart: () -> Boolean = { false }
     private var onSelectedMove: (Float, Float) -> Unit = { _, _ -> }
     private var onSelectedTransformEnd: () -> Unit = {}
@@ -129,7 +135,16 @@ class InkPageView(context: Context) : FrameLayout(context) {
                         onLassoFinished(stroke)
                     } else {
                         val spec = strokeBrushSpecs.remove(id) ?: brushProvider()
-                        onStrokeAdded(stroke.toRuntimeStroke(spec))
+                        val runtime = stroke.toRuntimeStroke(spec)
+                        onStrokeAdded(runtime)
+                        if (circleToLassoEnabledProvider() && looksLikeClosedLoop(runtime)) {
+                            val runnable = Runnable {
+                                pendingCircleLasso.remove(runtime.stored.id)
+                                onCircleHoldLasso(runtime.stored.id, stroke)
+                            }
+                            pendingCircleLasso[runtime.stored.id] = runnable
+                            postDelayed(runnable, CIRCLE_TO_LASSO_DELAY_MS)
+                        }
                     }
                 }
                 val finishedIds = strokes.keys.toSet()
@@ -154,12 +169,14 @@ class InkPageView(context: Context) : FrameLayout(context) {
         toolProvider: () -> ToolMode,
         brushProvider: () -> BrushSpec,
         navigationGestureProvider: () -> NavigationGestureMode,
+        circleToLassoEnabledProvider: () -> Boolean,
         onNavigationPan: (Float, Float) -> Unit,
         onStrokeAdded: (RuntimeStroke) -> Unit,
         onEraseStart: () -> Unit,
         onErase: (Float, Float, Float) -> Unit,
         onEraseEnd: () -> Unit,
         onLassoFinished: (Stroke) -> Unit,
+        onCircleHoldLasso: (String, Stroke) -> Unit,
         onSelectedTransformStart: () -> Boolean,
         onSelectedMove: (Float, Float) -> Unit,
         onSelectedTransformEnd: () -> Unit,
@@ -172,6 +189,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         onActivated: () -> Unit,
     ) {
         if (boundPageId != page.id) {
+            cancelPendingCircleLasso()
             boundPageId = page.id
             boundContentVersion = -1
             viewport.reset()
@@ -180,12 +198,14 @@ class InkPageView(context: Context) : FrameLayout(context) {
         this.toolProvider = toolProvider
         this.brushProvider = brushProvider
         this.navigationGestureProvider = navigationGestureProvider
+        this.circleToLassoEnabledProvider = circleToLassoEnabledProvider
         this.onNavigationPan = onNavigationPan
         this.onStrokeAdded = onStrokeAdded
         this.onEraseStart = onEraseStart
         this.onErase = onErase
         this.onEraseEnd = onEraseEnd
         this.onLassoFinished = onLassoFinished
+        this.onCircleHoldLasso = onCircleHoldLasso
         this.onSelectedTransformStart = onSelectedTransformStart
         this.onSelectedMove = onSelectedMove
         this.onSelectedTransformEnd = onSelectedTransformEnd
@@ -249,6 +269,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         }
 
         if (event.actionMasked == MotionEvent.ACTION_DOWN || event.actionMasked == MotionEvent.ACTION_POINTER_DOWN) {
+            cancelPendingCircleLasso()
             requestDisallowInterceptTouchEvent(true)
             onActivated()
         }
@@ -311,6 +332,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                cancelPendingCircleLasso()
                 requestDisallowInterceptTouchEvent(true)
                 onActivated()
                 touchGestureActive = true
@@ -633,6 +655,32 @@ class InkPageView(context: Context) : FrameLayout(context) {
         }
     }
 
+    private fun cancelPendingCircleLasso() {
+        pendingCircleLasso.values.forEach(::removeCallbacks)
+        pendingCircleLasso.clear()
+    }
+
+    private fun looksLikeClosedLoop(runtime: RuntimeStroke): Boolean {
+        val samples = runtime.samples
+        if (samples.size < 12) return false
+        val minX = samples.minOf { it.x }
+        val maxX = samples.maxOf { it.x }
+        val minY = samples.minOf { it.y }
+        val maxY = samples.maxOf { it.y }
+        val width = maxX - minX
+        val height = maxY - minY
+        val minimumDimension = min(width, height)
+        if (minimumDimension < MIN_CIRCLE_DIAMETER) return false
+        val first = samples.first()
+        val last = samples.last()
+        val closingDistance = hypot(last.x - first.x, last.y - first.y)
+        if (closingDistance > max(MAX_CIRCLE_GAP, minimumDimension * MAX_CIRCLE_GAP_RATIO)) return false
+        val pathLength = samples.zipWithNext().sumOf { (a, b) ->
+            hypot((b.x - a.x).toDouble(), (b.y - a.y).toDouble())
+        }.toFloat()
+        return pathLength >= (width + height) * MIN_CIRCLE_PATH_RATIO
+    }
+
     private fun finishEraserGesture() {
         if (!eraserGestureActive) return
         eraserGestureActive = false
@@ -641,6 +689,14 @@ class InkPageView(context: Context) : FrameLayout(context) {
 
     private fun releaseParentIntercept() {
         requestDisallowInterceptTouchEvent(false)
+    }
+
+    private companion object {
+        const val CIRCLE_TO_LASSO_DELAY_MS = 1_200L
+        const val MIN_CIRCLE_DIAMETER = 72f
+        const val MAX_CIRCLE_GAP = 28f
+        const val MAX_CIRCLE_GAP_RATIO = 0.24f
+        const val MIN_CIRCLE_PATH_RATIO = 1.15f
     }
 
     private inner class DryInkView(context: Context) : View(context) {

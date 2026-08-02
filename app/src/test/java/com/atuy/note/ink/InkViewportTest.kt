@@ -72,12 +72,33 @@ class InkViewportTest {
     }
 
     @Test
-    fun returningToMinimumZoomRecentersPage() {
+    fun zoomingBelowFitKeepsPageCentered() {
         val viewport = InkViewport()
-        viewport.zoomAt(2f, 100f, 100f, 100f, 100f, 200f, 200f)
-        viewport.panBy(-40f, -30f, 100f, 100f, 200f, 200f)
 
-        viewport.zoomAt(0.1f, 80f, 90f, 100f, 100f, 200f, 200f)
+        viewport.zoomAt(0.5f, 100f, 100f, 100f, 100f, 200f, 200f)
+
+        val transform = viewport.transform(100f, 100f, 200f, 200f)
+        assertEquals(0.5f, viewport.zoom, TOLERANCE)
+        assertEquals(1f, transform.scale, TOLERANCE)
+        assertEquals(50f, transform.translateX, TOLERANCE)
+        assertEquals(50f, transform.translateY, TOLERANCE)
+    }
+
+    @Test
+    fun minimumZoomIsClampedAtThirtyFivePercent() {
+        val viewport = InkViewport()
+
+        viewport.zoomAt(0.01f, 100f, 100f, 100f, 100f, 200f, 200f)
+
+        assertEquals(0.35f, viewport.zoom, TOLERANCE)
+    }
+
+    @Test
+    fun resetReturnsToFitZoom() {
+        val viewport = InkViewport()
+        viewport.zoomAt(0.5f, 100f, 100f, 100f, 100f, 200f, 200f)
+
+        viewport.reset()
 
         val transform = viewport.transform(100f, 100f, 200f, 200f)
         assertEquals(1f, viewport.zoom, TOLERANCE)
