@@ -1,0 +1,63 @@
+rent.height).coerceAtLeast(0.0001f)
+    }
+
+    private inner class DryInkView(context: Context) : View(context) {
+        private val renderer = CanvasStrokeRenderer.create()
+        private val transform = Matrix()
+        private val paperPaint = Paint().apply { color = Color.WHITE }
+        private val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        private val selectionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(25, 118, 210)
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+            pathEffect = DashPathEffect(floatArrayOf(12f, 8f), 0f)
+        }
+        var page: PageSession? = null
+        var backgroundBitmap: Bitmap? = null
+        var imageBitmaps: Map<String, Bitmap> = emptyMap()
+        var toolProvider: () -> ToolMode = { ToolMode.PEN }
+
+        override fun onDraw(canvas: Canvas) {
+            super.onDraw(canvas)
+            canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paperPaint)
+            backgroundBitmap?.let { bitmap ->
+                canvas.drawBitmap(bitmap, null, RectF(0f, 0f, width.toFloat(), height.toFloat()), null)
+            }
+            val current = page ?: return
+            val scale = contentScale()
+
+            current.images.forEach { image ->
+                val bitmap = imageBitmaps[image.entryName] ?: return@forEach
+                val rect = imageRect(image, scale)
+                canvas.drawBitmap(bitmap, null, rect, imagePaint)
+                if (toolProvider() == ToolMode.IMAGE && current.selectedImageId == image.id) {
+                    canvas.drawRect(rect, selectionPaint)
+                }
+            }
+
+            transform.reset()
+            transform.setScale(scale, scale)
+            current.strokes.forEach { renderer.draw(canvas, it.stroke, transform) }
+
+            if (toolProvider() == ToolMode.LASSO) {
+                current.selectedStrokeBounds()?.let { bounds ->
+                    val padding = 10f * scale
+                    canvas.drawRect(
+                        bounds[0] * scale - padding,
+                        bounds[1] * scale - padding,
+                        bounds[2] * scale + padding,
+                        bounds[3] * scale + padding,
+                        selectionPaint,
+                    )
+                }
+            }
+        }
+
+        private fun imageRect(image: PageImage, scale: Float) = RectF(
+            image.x * scale,
+            image.y * scale,
+            (image.x + image.width) * scale,
+            (image.y + image.height) * scale,
+        )
+    }
+}
