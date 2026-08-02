@@ -1,0 +1,82 @@
+name: Apply uploaded note fix
+
+on:
+  push:
+    branches:
+      - agent/note-app
+    paths:
+      - .github/workflows/apply-uploaded-note-fix.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-uploaded-note-fix
+  cancel-in-progress: false
+
+jobs:
+  apply-test-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/note-app
+          fetch-depth: 0
+
+      - name: Decode and apply the uploaded patch exactly
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/note-app-fixes.patch.gz.b64 <<'PATCH_B64'
+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
+PATCH_B64
+          base64 -d /tmp/note-app-fixes.patch.gz.b64 | gzip -d > /tmp/note-app-fixes.patch
+          echo '4c57fcecac798968e0a4ee3b19acfb669d7a32a5d7c765faf8b0121b9c9bf749  /tmp/note-app-fixes.patch' | sha256sum -c -
+          git apply --check /tmp/note-app-fixes.patch
+          git apply /tmp/note-app-fixes.patch
+          sha256sum -c <<'EXPECTED'
+27d6f69756a4a0c219fae95d886e70467af5f6212e779681c1f58a421b88a9ba  app/src/main/java/com/atuy/note/ink/InkPageView.kt
+536abecb2f47c6d9af14979d0f64d9fd1ff99b23ae0ddc2e4376d2d32bea8802  app/src/main/java/com/atuy/note/ink/InkViewport.kt
+a6a96fbc28f879fd8d153256d8187dcf77dc2083336104acdbcac359d503216b  app/src/test/java/com/atuy/note/ink/InkViewportTest.kt
+EXPECTED
+          git diff --check
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 35
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      - name: Build and test the exact uploaded patch
+        shell: bash
+        run: gradle :app:assembleDebug :app:testDebugUnitTest --stacktrace
+
+      - name: Commit and push only the uploaded patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/apply-uploaded-note-fix.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            app/src/main/java/com/atuy/note/ink/InkPageView.kt \
+            app/src/main/java/com/atuy/note/ink/InkViewport.kt \
+            app/src/main/java/com/atuy/note/ui/NoteApp.kt \
+            app/src/test/java/com/atuy/note/ink/InkViewportTest.kt \
+            docs/ARCHITECTURE.md \
+            .github/workflows/apply-uploaded-note-fix.yml
+          git diff --cached --check
+          git commit -m 'Fix PDF ink viewport synchronization'
+          git push origin HEAD:agent/note-app
