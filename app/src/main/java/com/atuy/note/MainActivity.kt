@@ -24,6 +24,10 @@ class MainActivity : ComponentActivity() {
         uri?.let(viewModel::importPdf)
     }
 
+    private val imagePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(viewModel::importImage)
+    }
+
     private val driveResolution = registerForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         if (result.resultCode != RESULT_OK) return@registerForActivityResult
         val data = result.data ?: return@registerForActivityResult
@@ -43,6 +47,7 @@ class MainActivity : ComponentActivity() {
                 NoteApp(
                     viewModel = viewModel,
                     onImportPdf = { pdfPicker.launch(arrayOf("application/pdf")) },
+                    onImportImage = { imagePicker.launch(arrayOf("image/*")) },
                     onSyncDrive = ::authorizeDrive,
                 )
             }
