@@ -10,6 +10,7 @@ import android.graphics.Paint
 import android.graphics.PointF
 import android.graphics.RectF
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.widget.FrameLayout
 import androidx.ink.authoring.InProgressStrokeId
@@ -29,13 +30,35 @@ import com.atuy.note.data.ToolMode
 import com.atuy.note.data.toBrush
 import com.atuy.note.data.toRuntimeStroke
 import kotlin.math.abs
-import kotlin.math.hypot
 import kotlin.math.min
 
 class InkPageView(context: Context) : FrameLayout(context) {
     private val dryView = DryInkView(context)
     private val wetView = InProgressStrokesView(context)
     private val predictor = MotionEventPredictor.newInstance(this)
+    private var scaleGestureInProgress = false
+    private val scaleDetector = ScaleGestureDetector(
+        context,
+        object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScaleBegin(detector: ScaleGestureDetector): Boolean {
+                scaleGestureInProgress = true
+                return true
+            }
+
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                zoomAt(
+                    detector.scaleFactor.coerceIn(0.75f, 1.33f),
+                    detector.focusX,
+                    detector.focusY,
+                )
+                return true
+            }
+
+            override fun onScaleEnd(detector: ScaleGestureDetector) {
+                scaleGestureInProgress = false
+            }
+        },
+    )
     private val pointerStrokes = mutableMapOf<Int, InProgressStrokeId>()
     private val strokeBrushSpecs = mutableMapOf<InProgressStrokeId, BrushSpec>()
     private val lassoStrokeIds = mutableSetOf<InProgressStrokeId>()
@@ -85,7 +108,6 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private var viewportPanY = 0f
     private var previousTouchCentroidX = 0f
     private var previousTouchCentroidY = 0f
-    private var previousTouchSpan = 0f
     private var touchGestureActive = false
 
     init {
@@ -95,7 +117,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
         isFocusableInTouchMode = true
         wetView.isClickable = false
         wetView.isFocusable = false
-        wetView.motionEventToViewTransform = Matrix()
+        scaleDetector.isQuickScaleEnabled = false
+        post { wetView.eagerInit() }
         wetView.addFinishedStrokesListener(object : InProgressStrokesFinishedListener {
             override fun onStrokesFinished(strokes: Map<InProgressStrokeId, Stroke>) {
                 strokes.forEach { (id, stroke) ->
@@ -106,11 +129,10 @@ class InkPageView(context: Context) : FrameLayout(context) {
                         onStrokeAdded(stroke.toRuntimeStroke(spec))
                     }
                 }
-                wetView.removeFinishedStrokes(strokes.keys)
                 dryView.invalidate()
+                wetView.removeFinishedStrokes(strokes.keys)
             }
         })
-        setOnTouchListener { _, event -> handleMotionEvent(event) }
     }
 
     fun bind(
@@ -173,6 +195,17 @@ class InkPageView(context: Context) : FrameLayout(context) {
         dryView.invalidate()
     }
 
+    override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN ||
+            event.actionMasked == MotionEvent.ACTION_POINTER_DOWN
+        ) {
+            requestDisallowInterceptTouchEvent(true)
+        }
+        return true
+    }
+
+    override fun onTouchEvent(event: MotionEvent): Boolean = handleMotionEvent(event)
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         clampViewport()
@@ -183,16 +216,21 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private fun handleMotionEvent(event: MotionEvent): Boolean {
         if (event.pointerCount <= 0) return false
         val actionIndex = event.actionIndex.coerceIn(0, event.pointerCount - 1)
-        val actionToolType = event.getToolType(actionIndex)
-        val actionIsStylus = actionToolType == MotionEvent.TOOL_TYPE_STYLUS ||
-            actionToolType == MotionEvent.TOOL_TYPE_ERASER
-        val hasStylus = (0 until event.pointerCount).any { index ->
+        val stylusIndex = (0 until event.pointerCount).firstOrNull { index ->
             val type = event.getToolType(index)
             type == MotionEvent.TOOL_TYPE_STYLUS || type == MotionEvent.TOOL_TYPE_ERASER
         }
+        val routedIndex = if (event.actionMasked == MotionEvent.ACTION_MOVE) {
+            stylusIndex ?: actionIndex
+        } else {
+            actionIndex
+        }
+        val actionToolType = event.getToolType(routedIndex)
+        val actionIsStylus = actionToolType == MotionEvent.TOOL_TYPE_STYLUS ||
+            actionToolType == MotionEvent.TOOL_TYPE_ERASER
 
         if (!actionIsStylus) {
-            if (hasStylus) return true
+            if (stylusIndex != null) return true
             return handleTouchMotion(event)
         }
 
@@ -201,16 +239,15 @@ class InkPageView(context: Context) : FrameLayout(context) {
             onActivated()
         }
 
-        if (toolProvider() == ToolMode.IMAGE) return handleImageMotion(event, actionIndex)
-        if (toolProvider() == ToolMode.LASSO) return handleLassoMotion(event, actionIndex)
+        if (toolProvider() == ToolMode.IMAGE) return handleImageMotion(event, routedIndex)
+        if (toolProvider() == ToolMode.LASSO) return handleLassoMotion(event, routedIndex)
 
-        predictor.record(event)
-        val pointerId = event.getPointerId(actionIndex)
+        val pointerId = event.getPointerId(routedIndex)
         val temporaryEraser = actionToolType == MotionEvent.TOOL_TYPE_ERASER ||
             event.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY != 0 ||
             event.buttonState and MotionEvent.BUTTON_STYLUS_SECONDARY != 0
         val erasing = toolProvider() == ToolMode.ERASER || temporaryEraser
-        val point = mapViewToWorld(event.getX(actionIndex), event.getY(actionIndex))
+        val point = mapViewToWorld(event.getX(routedIndex), event.getY(routedIndex))
 
         if (erasing) {
             val radius = 28f / viewportZoom.coerceAtLeast(1f)
@@ -247,12 +284,16 @@ class InkPageView(context: Context) : FrameLayout(context) {
             return true
         }
 
-        return handleAuthoredStroke(event, actionIndex, brushProvider().toBrush(), false)
+        return handleAuthoredStroke(event, routedIndex, brushProvider().toBrush(), false)
     }
 
     private fun handleTouchMotion(event: MotionEvent): Boolean {
-        val touchIndices = (0 until event.pointerCount).filter { event.getToolType(it) == MotionEvent.TOOL_TYPE_FINGER }
+        val touchIndices = (0 until event.pointerCount).filter {
+            event.getToolType(it) == MotionEvent.TOOL_TYPE_FINGER
+        }
         if (touchIndices.isEmpty()) return false
+
+        scaleDetector.onTouchEvent(event)
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
@@ -262,7 +303,6 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 val centroid = touchCentroid(event, touchIndices)
                 previousTouchCentroidX = centroid.x
                 previousTouchCentroidY = centroid.y
-                previousTouchSpan = 0f
                 return true
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
@@ -270,7 +310,6 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 val centroid = touchCentroid(event, touchIndices)
                 previousTouchCentroidX = centroid.x
                 previousTouchCentroidY = centroid.y
-                previousTouchSpan = touchSpan(event, touchIndices, centroid)
                 touchGestureActive = true
                 return true
             }
@@ -281,22 +320,12 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 val dy = centroid.y - previousTouchCentroidY
 
                 if (touchIndices.size >= 2) {
-                    val span = touchSpan(event, touchIndices, centroid)
-                    val scaleFactor = if (previousTouchSpan > 0.5f && span > 0.5f) {
-                        (span / previousTouchSpan).coerceIn(0.75f, 1.33f)
-                    } else {
-                        1f
-                    }
-                    val zooming = abs(scaleFactor - 1f) > 0.002f
-                    if (zooming) zoomAt(scaleFactor, centroid.x, centroid.y)
-                    if (viewportZoom > 1.001f) {
+                    if (viewportZoom > 1.001f || scaleDetector.isInProgress || scaleGestureInProgress) {
                         panViewport(dx, dy)
-                    } else if (!zooming) {
+                    } else if (navigationGestureProvider() == NavigationGestureMode.TWO_FINGER) {
                         onNavigationPan(dx, dy)
                     }
-                    previousTouchSpan = span
-                } else {
-                    previousTouchSpan = 0f
+                } else if (!scaleDetector.isInProgress && !scaleGestureInProgress) {
                     if (viewportZoom > 1.001f) {
                         if (navigationGestureProvider() == NavigationGestureMode.ONE_FINGER) {
                             panViewport(dx, dy)
@@ -316,13 +345,12 @@ class InkPageView(context: Context) : FrameLayout(context) {
                     val centroid = touchCentroid(event, remaining)
                     previousTouchCentroidX = centroid.x
                     previousTouchCentroidY = centroid.y
-                    previousTouchSpan = if (remaining.size >= 2) touchSpan(event, remaining, centroid) else 0f
                 }
                 return true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 touchGestureActive = false
-                previousTouchSpan = 0f
+                scaleGestureInProgress = false
                 releaseParentIntercept()
                 return true
             }
@@ -338,15 +366,6 @@ class InkPageView(context: Context) : FrameLayout(context) {
             y += event.getY(index)
         }
         return PointF(x / indices.size, y / indices.size)
-    }
-
-    private fun touchSpan(event: MotionEvent, indices: List<Int>, centroid: PointF): Float {
-        if (indices.size < 2) return 0f
-        var distance = 0f
-        indices.forEach { index ->
-            distance += hypot(event.getX(index) - centroid.x, event.getY(index) - centroid.y)
-        }
-        return distance / indices.size
     }
 
     private fun zoomAt(scaleFactor: Float, focusX: Float, focusY: Float) {
@@ -422,6 +441,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
             ),
         )
         check(worldToView.invert(viewToWorld)) { "Ink viewport matrix must be invertible" }
+        wetView.motionEventToViewTransform = Matrix(worldToView)
     }
 
     private fun fitScale(currentPage: PageSession): Float =
@@ -484,43 +504,60 @@ class InkPageView(context: Context) : FrameLayout(context) {
     ): Boolean {
         predictor.record(event)
         val pointerId = event.getPointerId(pointerIndex)
+        updateViewportMatrices()
+
         return when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 requestUnbufferedDispatch(event)
-                updateViewportMatrices()
-                val id = wetView.startStroke(
-                    event = event,
-                    pointerId = pointerId,
-                    brush = brush,
-                    motionEventToWorldTransform = Matrix(viewToWorld),
-                    strokeToWorldTransform = Matrix(),
-                )
-                pointerStrokes[pointerId] = id
-                if (lasso) lassoStrokeIds += id else strokeBrushSpecs[id] = brushProvider()
+                val worldEvent = event.transformedToWorld()
+                try {
+                    val id = wetView.startStroke(
+                        event = worldEvent,
+                        pointerId = pointerId,
+                        brush = brush,
+                        motionEventToWorldTransform = Matrix(),
+                        strokeToWorldTransform = Matrix(),
+                    )
+                    pointerStrokes[pointerId] = id
+                    if (lasso) lassoStrokeIds += id else strokeBrushSpecs[id] = brushProvider()
+                } finally {
+                    worldEvent.recycle()
+                }
                 true
             }
             MotionEvent.ACTION_MOVE -> {
-                for (index in 0 until event.pointerCount) {
-                    val type = event.getToolType(index)
-                    if (type != MotionEvent.TOOL_TYPE_STYLUS && type != MotionEvent.TOOL_TYPE_ERASER) continue
-                    val currentPointerId = event.getPointerId(index)
-                    val id = pointerStrokes[currentPointerId] ?: continue
-                    val predicted = predictor.predict()
-                    try {
-                        wetView.addToStroke(event, currentPointerId, id, predicted)
-                    } finally {
-                        predicted?.recycle()
+                val worldEvent = event.transformedToWorld()
+                val predicted = predictor.predict()
+                val worldPrediction = predicted?.transformedToWorld()
+                try {
+                    for (index in 0 until event.pointerCount) {
+                        val type = event.getToolType(index)
+                        if (type != MotionEvent.TOOL_TYPE_STYLUS && type != MotionEvent.TOOL_TYPE_ERASER) continue
+                        val currentPointerId = event.getPointerId(index)
+                        val id = pointerStrokes[currentPointerId] ?: continue
+                        wetView.addToStroke(worldEvent, currentPointerId, id, worldPrediction)
                     }
+                } finally {
+                    worldPrediction?.recycle()
+                    predicted?.recycle()
+                    worldEvent.recycle()
                 }
                 true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
-                pointerStrokes.remove(pointerId)?.let { id -> wetView.finishStroke(event, pointerId, id) }
+                val worldEvent = event.transformedToWorld()
+                try {
+                    pointerStrokes.remove(pointerId)?.let { id ->
+                        wetView.finishStroke(worldEvent, pointerId, id)
+                    }
+                } finally {
+                    worldEvent.recycle()
+                }
                 releaseParentIntercept()
                 true
             }
             MotionEvent.ACTION_CANCEL -> {
-                pointerStrokes.values.forEach { id -> wetView.cancelStroke(id, event) }
+                pointerStrokes.values.forEach { id -> wetView.cancelStroke(id, null) }
                 pointerStrokes.clear()
                 strokeBrushSpecs.clear()
                 lassoStrokeIds.clear()
@@ -529,6 +566,10 @@ class InkPageView(context: Context) : FrameLayout(context) {
             }
             else -> true
         }
+    }
+
+    private fun MotionEvent.transformedToWorld(): MotionEvent = MotionEvent.obtain(this).also { copy ->
+        copy.transform(viewToWorld)
     }
 
     private fun handleImageMotion(event: MotionEvent, pointerIndex: Int): Boolean {

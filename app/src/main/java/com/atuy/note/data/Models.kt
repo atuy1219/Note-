@@ -28,9 +28,6 @@ import java.util.UUID
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-import kotlin.math.PI
-import kotlin.math.roundToLong
-import kotlin.math.sqrt
 
 const val NOTE_MIME_TYPE = "application/vnd.atuy.note+zip"
 const val NOTE_EXTENSION = ".atnote"
@@ -158,7 +155,6 @@ enum class BrushKind { PRESSURE_PEN, MARKER, HIGHLIGHTER, CUSTOM }
 enum class ToolMode { PEN, ERASER, LASSO, IMAGE }
 enum class ScrollAxis { VERTICAL, HORIZONTAL }
 enum class NavigationGestureMode { ONE_FINGER, TWO_FINGER }
-enum class EraserMode { WHOLE_STROKE, PARTIAL }
 enum class LassoCoverageMode(val minimumCoverage: Float) {
     INTERSECTS(0f), QUARTER(0.25f), HALF(0.5f), ALMOST_ALL(0.9f)
 }
@@ -218,10 +214,7 @@ class PageSession(
         clearStrokeSelection()
     }
 
-    fun eraseAt(x: Float, y: Float, radius: Float, mode: EraserMode): Boolean = when (mode) {
-        EraserMode.WHOLE_STROKE -> eraseWholeStrokes(x, y, radius)
-        EraserMode.PARTIAL -> eraseStrokeParts(x, y, radius)
-    }
+    fun eraseAt(x: Float, y: Float, radius: Float): Boolean = eraseWholeStrokes(x, y, radius)
 
     fun endEraseGesture(): Boolean {
         val before = eraseGestureBefore ?: return false
@@ -522,22 +515,6 @@ class PageSession(
         return changed
     }
 
-    private fun eraseStrokeParts(x: Float, y: Float, radius: Float): Boolean {
-        var changed = false
-        val replacement = mutableListOf<RuntimeStroke>()
-        for (runtime in strokes) {
-            val split = splitSamplesOutsideCircle(runtime.samples, x, y, radius)
-            if (split == null) {
-                replacement += runtime
-                continue
-            }
-            changed = true
-            split.mapNotNullTo(replacement) { samples -> runtime.runtimeWithSamples(samples) }
-        }
-        if (changed) replaceAllStrokes(replacement)
-        return changed
-    }
-
     private fun replaceImage(image: PageImage) {
         val index = images.indexOfFirst { it.id == image.id }
         if (index >= 0) {
@@ -663,28 +640,6 @@ fun StoredStroke.toRuntimeOrNull(officialBytes: ByteArray?): RuntimeStroke? = ru
     RuntimeStroke(normalized, Stroke(brush.toBrush(), decoded), runtimeSamples)
 }.getOrNull()
 
-private fun RuntimeStroke.runtimeWithSamples(rawSamples: List<InkSample>): RuntimeStroke? = runCatching {
-    val samples = sanitizeSamples(rawSamples)
-    check(samples.size >= 2) { "Not enough stroke samples" }
-    val batch = MutableStrokeInputBatch()
-    samples.forEach { sample ->
-        batch.add(
-            type = sample.toolType.toInputToolType(),
-            x = sample.x,
-            y = sample.y,
-            elapsedTimeMillis = sample.elapsedTimeMillis,
-            strokeUnitLengthCm = sample.strokeUnitLengthCm ?: StrokeInput.NO_STROKE_UNIT_LENGTH,
-            pressure = sample.pressure ?: StrokeInput.NO_PRESSURE,
-            tiltRadians = sample.tiltRadians ?: StrokeInput.NO_TILT,
-            orientationRadians = sample.orientationRadians ?: StrokeInput.NO_ORIENTATION,
-        )
-    }
-    batch.setNoiseSeed(stroke.inputs.getNoiseSeed())
-    val id = UUID.randomUUID().toString()
-    val metadata = StoredStroke(id = id, brush = stored.brush, inkEntry = "ink/strokes/$id.bin")
-    RuntimeStroke(metadata, Stroke(stored.brush.toBrush(), batch), samples)
-}.getOrNull()
-
 private fun RuntimeStroke.withBrush(spec: BrushSpec): RuntimeStroke {
     val metadata = stored.copy(brush = spec)
     return RuntimeStroke(metadata, Stroke(spec.toBrush(), stroke.inputs), samples)
@@ -738,24 +693,6 @@ private fun InputToolType.toStoredInputToolType(): StoredInputToolType = when (t
     else -> StoredInputToolType.STYLUS
 }
 
-private fun StoredInputToolType.toInputToolType(): InputToolType = when (this) {
-    StoredInputToolType.MOUSE -> InputToolType.MOUSE
-    StoredInputToolType.TOUCH -> InputToolType.TOUCH
-    StoredInputToolType.STYLUS -> InputToolType.STYLUS
-}
-
-private fun sanitizeSamples(samples: List<InkSample>): List<InkSample> {
-    if (samples.isEmpty()) return emptyList()
-    val output = ArrayList<InkSample>(samples.size)
-    for (sample in samples) {
-        val previous = output.lastOrNull()
-        if (previous == null || abs(previous.x - sample.x) > 0.001f || abs(previous.y - sample.y) > 0.001f) {
-            output += sample
-        }
-    }
-    return output
-}
-
 private fun sameStrokeSequence(a: List<RuntimeStroke>, b: List<RuntimeStroke>): Boolean =
     a.size == b.size && a.indices.all { index ->
         a[index].stored.id == b[index].stored.id && a[index].samples == b[index].samples
@@ -767,106 +704,6 @@ private fun polylineIntersectsCircle(samples: List<InkSample>, cx: Float, cy: Fl
     return samples.zipWithNext().any { (a, b) ->
         squaredDistancePointToSegment(cx, cy, a.x, a.y, b.x, b.y) <= radius * radius
     }
-}
-
-internal fun splitSamplesOutsideCircle(
-    samples: List<InkSample>,
-    cx: Float,
-    cy: Float,
-    radius: Float,
-): List<List<InkSample>>? {
-    if (!polylineIntersectsCircle(samples, cx, cy, radius)) return null
-    if (samples.size < 2) return emptyList()
-
-    val runs = mutableListOf<List<InkSample>>()
-    var current: MutableList<InkSample>? = null
-
-    fun finishCurrent() {
-        val cleaned = current?.let(::sanitizeSamples).orEmpty()
-        if (cleaned.size >= 2) runs += cleaned
-        current = null
-    }
-
-    for ((a, b) in samples.zipWithNext()) {
-        val cuts = buildList {
-            add(0f)
-            addAll(segmentCircleIntersections(a, b, cx, cy, radius))
-            add(1f)
-        }.sorted().fold(mutableListOf<Float>()) { acc, value ->
-            if (acc.isEmpty() || abs(acc.last() - value) > 0.0001f) acc += value.coerceIn(0f, 1f)
-            acc
-        }
-
-        for (index in 0 until cuts.lastIndex) {
-            val t0 = cuts[index]
-            val t1 = cuts[index + 1]
-            if (t1 - t0 <= 0.0001f) continue
-            val mid = interpolate(a, b, (t0 + t1) / 2f)
-            val outside = squaredDistance(mid.x, mid.y, cx, cy) >= radius * radius
-            if (outside) {
-                val p0 = interpolate(a, b, t0)
-                val p1 = interpolate(a, b, t1)
-                val target = current ?: mutableListOf<InkSample>().also { current = it }
-                if (target.isEmpty() || squaredDistance(target.last().x, target.last().y, p0.x, p0.y) > 0.0001f) {
-                    target += p0
-                }
-                if (squaredDistance(target.last().x, target.last().y, p1.x, p1.y) > 0.0001f) {
-                    target += p1
-                }
-            } else {
-                finishCurrent()
-            }
-        }
-    }
-    finishCurrent()
-    return runs
-}
-
-private fun segmentCircleIntersections(
-    a: InkSample,
-    b: InkSample,
-    cx: Float,
-    cy: Float,
-    radius: Float,
-): List<Float> {
-    val dx = b.x - a.x
-    val dy = b.y - a.y
-    val fx = a.x - cx
-    val fy = a.y - cy
-    val aa = dx * dx + dy * dy
-    if (aa <= 0.000001f) return emptyList()
-    val bb = 2f * (fx * dx + fy * dy)
-    val cc = fx * fx + fy * fy - radius * radius
-    val discriminant = bb * bb - 4f * aa * cc
-    if (discriminant < 0f) return emptyList()
-    val root = sqrt(discriminant)
-    val t1 = (-bb - root) / (2f * aa)
-    val t2 = (-bb + root) / (2f * aa)
-    return listOf(t1, t2).filter { it > 0f && it < 1f }
-}
-
-private fun interpolate(a: InkSample, b: InkSample, t: Float) = InkSample(
-    x = a.x + (b.x - a.x) * t,
-    y = a.y + (b.y - a.y) * t,
-    elapsedTimeMillis = a.elapsedTimeMillis + ((b.elapsedTimeMillis - a.elapsedTimeMillis) * t).roundToLong(),
-    strokeUnitLengthCm = a.strokeUnitLengthCm ?: b.strokeUnitLengthCm,
-    pressure = interpolateOptional(a.pressure, b.pressure, t),
-    tiltRadians = interpolateOptional(a.tiltRadians, b.tiltRadians, t),
-    orientationRadians = interpolateOrientation(a.orientationRadians, b.orientationRadians, t),
-    toolType = a.toolType,
-)
-
-private fun interpolateOptional(a: Float?, b: Float?, t: Float): Float? =
-    if (a != null && b != null) a + (b - a) * t else a ?: b
-
-private fun interpolateOrientation(a: Float?, b: Float?, t: Float): Float? {
-    if (a == null || b == null) return a ?: b
-    val turn = (2.0 * PI).toFloat()
-    var delta = (b - a) % turn
-    val halfTurn = PI.toFloat()
-    if (delta > halfTurn) delta -= turn
-    if (delta < -halfTurn) delta += turn
-    return ((a + delta * t) % turn + turn) % turn
 }
 
 private fun squaredDistancePointToSegment(

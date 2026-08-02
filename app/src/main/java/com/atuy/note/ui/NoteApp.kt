@@ -100,7 +100,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.atuy.note.MainViewModel
 import com.atuy.note.data.BrushKind
 import com.atuy.note.data.CustomBrushSpec
-import com.atuy.note.data.EraserMode
 import com.atuy.note.data.FolderRecord
 import com.atuy.note.data.LassoCoverageMode
 import com.atuy.note.data.NavigationGestureMode
@@ -466,18 +465,6 @@ private fun InkToolbar(viewModel: MainViewModel, onImportImage: () -> Unit) {
             leadingIcon = { Icon(Icons.Default.Gesture, null, Modifier.size(18.dp)) },
         )
 
-        if (viewModel.toolMode == ToolMode.ERASER) {
-            FilterChip(
-                selected = viewModel.eraserMode == EraserMode.PARTIAL,
-                onClick = { viewModel.setEraserMode(EraserMode.PARTIAL) },
-                label = { Text("部分消し") },
-            )
-            FilterChip(
-                selected = viewModel.eraserMode == EraserMode.WHOLE_STROKE,
-                onClick = { viewModel.setEraserMode(EraserMode.WHOLE_STROKE) },
-                label = { Text("線全体") },
-            )
-        }
 
         if (viewModel.toolMode == ToolMode.LASSO) {
             VerticalDivider(Modifier.height(32.dp).width(1.dp))

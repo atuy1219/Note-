@@ -15,7 +15,6 @@ import androidx.ink.strokes.Stroke
 import com.atuy.note.data.BrushKind
 import com.atuy.note.data.BrushSpec
 import com.atuy.note.data.CustomBrushSpec
-import com.atuy.note.data.EraserMode
 import com.atuy.note.data.FolderRecord
 import com.atuy.note.data.LassoCoverageMode
 import com.atuy.note.data.LibraryIndex
@@ -61,9 +60,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val navigationGestureMode: NavigationGestureMode
         get() = navigationGestureModeState
 
-    private var eraserModeState by mutableStateOf(enumPreference("eraser_mode", EraserMode.PARTIAL))
-    val eraserMode: EraserMode
-        get() = eraserModeState
 
     private var lassoCoverageModeState by mutableStateOf(
         enumPreference("lasso_coverage", LassoCoverageMode.HALF),
@@ -246,11 +242,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         preferences.edit().putString("navigation_gesture", mode.name).apply()
     }
 
-    fun setEraserMode(mode: EraserMode) {
-        eraserModeState = mode
-        preferences.edit().putString("eraser_mode", mode.name).apply()
-        setTool(ToolMode.ERASER)
-    }
 
     fun setLassoCoverageMode(mode: LassoCoverageMode) {
         lassoCoverageModeState = mode
@@ -273,7 +264,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun beginErase(page: PageSession) { page.beginEraseGesture() }
-    fun eraseAt(page: PageSession, x: Float, y: Float, radius: Float) { page.eraseAt(x, y, radius, eraserMode) }
+    fun eraseAt(page: PageSession, x: Float, y: Float, radius: Float) { page.eraseAt(x, y, radius) }
     fun endErase(page: PageSession) { if (page.endEraseGesture()) markDirty() }
 
     fun selectWithLasso(page: PageSession, lasso: Stroke) {
