@@ -26,7 +26,10 @@ jobs:
       - name: Apply verified input pipeline changes
         shell: bash
         run: |
-          cat scripts/input_fix.part* | base64 -d | gzip -d > /tmp/apply_input_fix.py
+          {
+            head -c 8000 scripts/input_fix.part0
+            cat scripts/input_fix.part1 scripts/input_fix.part2 scripts/input_fix.part3 scripts/input_fix.part4
+          } | base64 -d | gzip -d > /tmp/apply_input_fix.py
           python /tmp/apply_input_fix.py
           rm -f scripts/input_fix.part*
 
