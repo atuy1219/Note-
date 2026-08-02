@@ -24,3 +24,5 @@ jobs:
           name: source-snapshot
           path: source-snapshot.zip
           if-no-files-found: error
+      - name: Signal snapshot availability
+        run: exit 1
