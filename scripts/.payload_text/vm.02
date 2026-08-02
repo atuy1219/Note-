@@ -1,0 +1,65 @@
+let { session -> viewModelScope.launch { saveNow(session) } }
+    }
+
+    suspend fun renderPdfPage(session: NoteSession, page: PageSession, targetWidth: Int): Bitmap? =
+        repository.renderPdfPage(session, page, targetWidth)
+
+    fun syncWithDrive(accessToken: String) {
+        viewModelScope.launch {
+            runBusy {
+                openTabs.filter { it.dirty }.forEach { saveNow(it) }
+                val result = driveSync.sync(accessToken, library.folders) { message ->
+                    viewModelScope.launch { statusMessage = message }
+                }
+                library = repository.rebuildLibrary(result.folders)
+                statusMessage = "Drive sync: ${result.uploaded} uploaded, ${result.downloaded} downloaded" +
+                    if (result.conflicts > 0) ", ${result.conflicts} conflicts copied" else ""
+            }
+        }
+    }
+
+    fun handleStylusKey(event: KeyEvent): Boolean {
+        if (event.action != KeyEvent.ACTION_DOWN || event.repeatCount != 0) return false
+        return when (event.keyCode) {
+            601 -> { toggleEraser(); true }
+            718 -> {
+                val now = event.eventTime
+                if (lastLenovoDoubleTapAt != 0L && now - lastLenovoDoubleTapAt <= 650L) {
+                    lastLenovoDoubleTapAt = 0L
+                    toggleEraser()
+                } else {
+                    lastLenovoDoubleTapAt = now
+                }
+                true
+            }
+            else -> false
+        }
+    }
+
+    private fun markDirty() { activeSession?.let(::markDirty) }
+
+    private fun markDirty(session: NoteSession) {
+        session.dirty = true
+        saveJobs.remove(session.id)?.cancel()
+        saveJobs[session.id] = viewModelScope.launch {
+            delay(900)
+            saveNow(session)
+        }
+    }
+
+    private suspend fun saveNow(session: NoteSession) {
+        saveMutex.withLock {
+            if (!session.dirty) return
+            library = repository.saveSession(session, library)
+        }
+    }
+
+    private suspend fun runBusy(block: suspend () -> Unit) {
+        busy = true
+        runCatching { block() }.onFailure { statusMessage = it.message ?: it.javaClass.simpleName }
+        busy = false
+    }
+
+    private inline fun <reified T : Enum<T>> enumPreference(key: String, fallback: T): T =
+        runCatching { enumValueOf<T>(preferences.getString(key, null) ?: fallback.name) }.getOrDefault(fallback)
+}
