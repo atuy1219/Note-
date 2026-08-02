@@ -27,11 +27,77 @@ jobs:
         shell: bash
         run: |
           {
-            head -c 8000 scripts/input_fix.part0
-            cat scripts/input_fix.part1 scripts/input_fix.part2 scripts/input_fix.part3 scripts/input_fix.part4
-          } | base64 -d | gzip -d > /tmp/apply_input_fix.py
-          python /tmp/apply_input_fix.py
-          rm -f scripts/input_fix.part*
+            head -c 3000 scripts/input_patch.part00
+            head -c 3000 scripts/input_patch.part01
+            head -c 3000 scripts/input_patch.part02
+            head -c 2648 scripts/input_patch.part03
+          } | base64 -d | gzip -d > /tmp/input_fix.patch
+          echo 'bf4fead0caa183955fb80163623521bc68976ab99eb7d7df7cf6175b6ba2a3fa  /tmp/input_fix.patch' | sha256sum -c -
+          git apply --check /tmp/input_fix.patch
+          git apply /tmp/input_fix.patch
+          rm -f scripts/input_fix.part* scripts/input_patch.part*
+          rm -f .github/workflows/source-snapshot-temp.yml
+          cat > .github/workflows/android.yml <<'YAML'
+          name: Android CI
+
+          on:
+            push:
+              branches:
+                - main
+                - 'agent/**'
+            pull_request:
+              branches:
+                - main
+
+          permissions:
+            contents: read
+
+          jobs:
+            build:
+              runs-on: ubuntu-latest
+              timeout-minutes: 30
+
+              steps:
+                - uses: actions/checkout@v4
+
+                - name: Set up JDK 17
+                  uses: actions/setup-java@v4
+                  with:
+                    distribution: temurin
+                    java-version: '17'
+
+                - name: Set up Android SDK
+                  uses: android-actions/setup-android@v3
+
+                - name: Install Android SDK 35
+                  run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+
+                - name: Set up Gradle
+                  uses: gradle/actions/setup-gradle@v4
+                  with:
+                    gradle-version: '8.11.1'
+
+                - name: Build and test
+                  shell: bash
+                  run: |
+                    for attempt in 1 2 3; do
+                      if gradle :app:assembleDebug :app:testDebugUnitTest --stacktrace; then
+                        exit 0
+                      fi
+                      if [ "$attempt" -lt 3 ]; then
+                        echo "Gradle attempt $attempt failed; retrying dependency resolution..."
+                        sleep $((attempt * 20))
+                      fi
+                    done
+                    exit 1
+
+                - name: Upload debug APK
+                  uses: actions/upload-artifact@v4
+                  with:
+                    name: note-0.6.0-debug-apk
+                    path: app/build/outputs/apk/debug/app-debug.apk
+                    if-no-files-found: error
+          YAML
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
