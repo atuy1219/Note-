@@ -389,6 +389,11 @@ private fun EditorScreen(viewModel: MainViewModel, onImportImage: () -> Unit, sn
                             },
                         )
                     }
+                    Tab(
+                        selected = false,
+                        onClick = { viewModel.createBlankNote("Untitled") },
+                        text = { Icon(Icons.Default.Add, "新しいタブ") },
+                    )
                 }
             }
         },
@@ -626,62 +631,51 @@ private fun BrushSlider(
 private fun Pages(viewModel: MainViewModel, session: NoteSession, modifier: Modifier) {
     BoxWithConstraints(modifier.fillMaxSize()) {
         val horizontalPageWidth = if (maxWidth >= 840.dp) 760.dp else maxWidth - 24.dp
-        val twoFinger = viewModel.navigationGestureMode == NavigationGestureMode.TWO_FINGER
         when (viewModel.scrollAxis) {
             ScrollAxis.VERTICAL -> {
                 val state = rememberLazyListState()
                 LazyColumn(
-                    modifier = Modifier.fillMaxSize().twoFingerPan(twoFinger) { delta -> state.dispatchRawDelta(-delta.y) },
+                    modifier = Modifier.fillMaxSize(),
                     state = state,
-                    userScrollEnabled = !twoFinger,
+                    userScrollEnabled = false,
                     contentPadding = PaddingValues(12.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     itemsIndexed(session.pages, key = { _, page -> page.id }) { index, page ->
-                        NotePage(viewModel, session, page, index, Modifier.fillMaxWidth().widthIn(max = 900.dp))
+                        NotePage(
+                            viewModel = viewModel,
+                            session = session,
+                            page = page,
+                            index = index,
+                            modifier = Modifier.fillMaxWidth().widthIn(max = 900.dp),
+                            onNavigationPan = { _, dy -> state.dispatchRawDelta(-dy) },
+                        )
                     }
                 }
             }
             ScrollAxis.HORIZONTAL -> {
                 val state = rememberLazyListState()
                 LazyRow(
-                    modifier = Modifier.fillMaxSize().twoFingerPan(twoFinger) { delta -> state.dispatchRawDelta(-delta.x) },
+                    modifier = Modifier.fillMaxSize(),
                     state = state,
-                    userScrollEnabled = !twoFinger,
+                    userScrollEnabled = false,
                     contentPadding = PaddingValues(12.dp),
                     horizontalArrangement = Arrangement.spacedBy(18.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     itemsIndexed(session.pages, key = { _, page -> page.id }) { index, page ->
-                        NotePage(viewModel, session, page, index, Modifier.width(horizontalPageWidth))
+                        NotePage(
+                            viewModel = viewModel,
+                            session = session,
+                            page = page,
+                            index = index,
+                            modifier = Modifier.width(horizontalPageWidth),
+                            onNavigationPan = { dx, _ -> state.dispatchRawDelta(-dx) },
+                        )
                     }
                 }
             }
-        }
-    }
-}
-
-private fun Modifier.twoFingerPan(enabled: Boolean, onPan: (Offset) -> Unit): Modifier {
-    if (!enabled) return this
-    return pointerInput(enabled) {
-        awaitEachGesture {
-            var previousCentroid: Offset? = null
-            do {
-                val event = awaitPointerEvent(PointerEventPass.Initial)
-                val touches = event.changes.filter { it.pressed && it.type == PointerType.Touch }
-                if (touches.size >= 2) {
-                    val centroid = Offset(
-                        x = touches.sumOf { it.position.x.toDouble() }.toFloat() / touches.size,
-                        y = touches.sumOf { it.position.y.toDouble() }.toFloat() / touches.size,
-                    )
-                    previousCentroid?.let { previous -> onPan(centroid - previous) }
-                    previousCentroid = centroid
-                    touches.forEach { it.consume() }
-                } else {
-                    previousCentroid = null
-                }
-            } while (event.changes.any { it.pressed })
         }
     }
 }
@@ -693,6 +687,7 @@ private fun NotePage(
     page: PageSession,
     index: Int,
     modifier: Modifier,
+    onNavigationPan: (Float, Float) -> Unit,
 ) {
     val background by produceState<Bitmap?>(initialValue = null, session.id, page.id) {
         value = viewModel.renderPdfPage(session, page, 1200)
@@ -716,6 +711,8 @@ private fun NotePage(
                         imageBitmaps = session.imageBitmaps,
                         toolProvider = { viewModel.toolMode },
                         brushProvider = { viewModel.brushSpec },
+                        navigationGestureProvider = { viewModel.navigationGestureMode },
+                        onNavigationPan = onNavigationPan,
                         onStrokeAdded = { viewModel.addStroke(page, it) },
                         onEraseStart = { viewModel.beginErase(page) },
                         onErase = { x, y, radius -> viewModel.eraseAt(page, x, y, radius) },
