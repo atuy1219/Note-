@@ -1,0 +1,26 @@
+name: Export source snapshot
+
+on:
+  push:
+    branches:
+      - agent/goodnotes-foundation
+    paths:
+      - .github/workflows/export-source.yml
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/goodnotes-foundation
+      - name: Create source archive
+        run: zip -r source-snapshot.zip . -x '.git/*' 'source-snapshot.zip'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-snapshot
+          path: source-snapshot.zip
+          if-no-files-found: error
