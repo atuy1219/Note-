@@ -41,7 +41,7 @@ jobs:
         shell: bash
         run: |
           for attempt in 1 2 3; do
-            if gradle :app:assembleDebug :app:testDebugUnitTest --stacktrace; then
+            if gradle :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest --stacktrace; then
               exit 0
             fi
             if [ "$attempt" -lt 3 ]; then
@@ -51,9 +51,9 @@ jobs:
           done
           exit 1
 
-      - name: Upload debug APK
+      - name: Upload APKs
         uses: actions/upload-artifact@v4
         with:
-          name: note-0.6.0-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: note-ci-apks
+          path: app/build/outputs/apk/**/*.apk
           if-no-files-found: error
