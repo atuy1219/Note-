@@ -50,12 +50,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var scrollAxis by mutableStateOf(ScrollAxis.VERTICAL)
         private set
-    var navigationGestureMode by mutableStateOf(
+
+    private var navigationGestureModeState by mutableStateOf(
         enumPreference("navigation_gesture", NavigationGestureMode.ONE_FINGER),
     )
-        private set
-    var eraserMode by mutableStateOf(enumPreference("eraser_mode", EraserMode.PARTIAL))
-        private set
+    val navigationGestureMode: NavigationGestureMode
+        get() = navigationGestureModeState
+
+    private var eraserModeState by mutableStateOf(enumPreference("eraser_mode", EraserMode.PARTIAL))
+    val eraserMode: EraserMode
+        get() = eraserModeState
+
     var busy by mutableStateOf(false)
         private set
     var statusMessage by mutableStateOf<String?>(null)
@@ -187,12 +192,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setNavigationGestureMode(mode: NavigationGestureMode) {
-        navigationGestureMode = mode
+        navigationGestureModeState = mode
         preferences.edit().putString("navigation_gesture", mode.name).apply()
     }
 
     fun setEraserMode(mode: EraserMode) {
-        eraserMode = mode
+        eraserModeState = mode
         preferences.edit().putString("eraser_mode", mode.name).apply()
         setTool(ToolMode.ERASER)
     }
