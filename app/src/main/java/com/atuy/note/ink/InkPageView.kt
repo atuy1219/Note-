@@ -18,6 +18,7 @@ import androidx.ink.strokes.Stroke
 import androidx.input.motionprediction.MotionEventPredictor
 import com.atuy.note.data.BrushSpec
 import com.atuy.note.data.InkSample
+import com.atuy.note.data.PageImage
 import com.atuy.note.data.PageSession
 import com.atuy.note.data.RuntimeStroke
 import com.atuy.note.data.ToolMode
@@ -34,11 +35,23 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private val strokeBrushSpecs = mutableMapOf<InProgressStrokeId, BrushSpec>()
     private var page: PageSession? = null
     private var backgroundBitmap: Bitmap? = null
+    private var imageBitmaps: Map<String, Bitmap> = emptyMap()
     private var toolProvider: () -> ToolMode = { ToolMode.PEN }
     private var brushProvider: () -> BrushSpec = { BrushSpec() }
     private var onStrokeAdded: (RuntimeStroke) -> Unit = {}
+    private var onEraseStart: () -> Unit = {}
     private var onErase: (Float, Float, Float) -> Unit = { _, _, _ -> }
+    private var onEraseEnd: () -> Unit = {}
+    private var onImageSelected: (String?) -> Unit = {}
+    private var onImageTransformStart: (String) -> Boolean = { false }
+    private var onImageMove: (String, Float, Float) -> Unit = { _, _, _ -> }
+    private var onImageTransformEnd: () -> Unit = {}
+    private var onImageTransformCancel: () -> Unit = {}
     private var onActivated: () -> Unit = {}
+    private var draggingImageId: String? = null
+    private var imageDragOffsetX = 0f
+    private var imageDragOffsetY = 0f
+    private var eraserGestureActive = false
 
     init {
         setWillNotDraw(false)
@@ -65,31 +78,56 @@ class InkPageView(context: Context) : FrameLayout(context) {
     fun bind(
         page: PageSession,
         background: Bitmap?,
+        imageBitmaps: Map<String, Bitmap>,
         toolProvider: () -> ToolMode,
         brushProvider: () -> BrushSpec,
         onStrokeAdded: (RuntimeStroke) -> Unit,
+        onEraseStart: () -> Unit,
         onErase: (Float, Float, Float) -> Unit,
+        onEraseEnd: () -> Unit,
+        onImageSelected: (String?) -> Unit,
+        onImageTransformStart: (String) -> Boolean,
+        onImageMove: (String, Float, Float) -> Unit,
+        onImageTransformEnd: () -> Unit,
+        onImageTransformCancel: () -> Unit,
         onActivated: () -> Unit,
     ) {
         this.page = page
         this.backgroundBitmap = background
+        this.imageBitmaps = imageBitmaps
         this.toolProvider = toolProvider
         this.brushProvider = brushProvider
         this.onStrokeAdded = onStrokeAdded
+        this.onEraseStart = onEraseStart
         this.onErase = onErase
+        this.onEraseEnd = onEraseEnd
+        this.onImageSelected = onImageSelected
+        this.onImageTransformStart = onImageTransformStart
+        this.onImageMove = onImageMove
+        this.onImageTransformEnd = onImageTransformEnd
+        this.onImageTransformCancel = onImageTransformCancel
         this.onActivated = onActivated
         dryView.page = page
         dryView.backgroundBitmap = background
+        dryView.imageBitmaps = imageBitmaps
+        dryView.toolProvider = toolProvider
         dryView.invalidate()
     }
 
     private fun handleMotionEvent(event: MotionEvent): Boolean {
-        val index = event.actionIndex.coerceAtLeast(0)
+        if (event.pointerCount <= 0) return false
+        val index = event.actionIndex.coerceIn(0, event.pointerCount - 1)
         val toolType = event.getToolType(index)
         val stylus = toolType == MotionEvent.TOOL_TYPE_STYLUS || toolType == MotionEvent.TOOL_TYPE_ERASER
         if (!stylus) return false
 
-        onActivated()
+        if (event.actionMasked == MotionEvent.ACTION_DOWN || event.actionMasked == MotionEvent.ACTION_POINTER_DOWN) {
+            requestDisallowInterceptTouchEvent(true)
+            onActivated()
+        }
+
+        if (toolProvider() == ToolMode.IMAGE) return handleImageMotion(event, index)
+
         predictor.record(event)
         val pointerId = event.getPointerId(index)
         val temporaryEraser = toolType == MotionEvent.TOOL_TYPE_ERASER ||
@@ -101,8 +139,32 @@ class InkPageView(context: Context) : FrameLayout(context) {
         val worldY = event.getY(index) / scale
 
         if (erasing) {
-            if (event.actionMasked == MotionEvent.ACTION_DOWN || event.actionMasked == MotionEvent.ACTION_MOVE) {
-                onErase(worldX, worldY, 28f)
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                    if (!eraserGestureActive) {
+                        eraserGestureActive = true
+                        onEraseStart()
+                    }
+                    onErase(worldX, worldY, 28f)
+                    dryView.invalidate()
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    for (pointerIndex in 0 until event.pointerCount) {
+                        onErase(event.getX(pointerIndex) / scale, event.getY(pointerIndex) / scale, 28f)
+                    }
+                    dryView.invalidate()
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                    onErase(worldX, worldY, 28f)
+                    finishEraserGesture()
+                    requestDisallowInterceptTouchEvent(false)
+                    dryView.invalidate()
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    finishEraserGesture()
+                    requestDisallowInterceptTouchEvent(false)
+                    dryView.invalidate()
+                }
             }
             return true
         }
@@ -145,9 +207,12 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 true
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
-                val id = pointerStrokes.remove(pointerId) ?: return true
-                strokeSamples[id]?.add(sample(event, index, scale))
-                wetView.finishStroke(event, pointerId, id)
+                val id = pointerStrokes.remove(pointerId)
+                if (id != null) {
+                    strokeSamples[id]?.add(sample(event, index, scale))
+                    wetView.finishStroke(event, pointerId, id)
+                }
+                requestDisallowInterceptTouchEvent(false)
                 true
             }
             MotionEvent.ACTION_CANCEL -> {
@@ -155,10 +220,61 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 pointerStrokes.clear()
                 strokeSamples.clear()
                 strokeBrushSpecs.clear()
+                requestDisallowInterceptTouchEvent(false)
                 true
             }
             else -> true
         }
+    }
+
+    private fun handleImageMotion(event: MotionEvent, pointerIndex: Int): Boolean {
+        val currentPage = page ?: return true
+        val scale = contentScale()
+        val worldX = event.getX(pointerIndex) / scale
+        val worldY = event.getY(pointerIndex) / scale
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                val hit = currentPage.images.asReversed().firstOrNull { image ->
+                    worldX >= image.x && worldX <= image.x + image.width &&
+                        worldY >= image.y && worldY <= image.y + image.height
+                }
+                onImageSelected(hit?.id)
+                dryView.invalidate()
+                if (hit != null && onImageTransformStart(hit.id)) {
+                    draggingImageId = hit.id
+                    imageDragOffsetX = worldX - hit.x
+                    imageDragOffsetY = worldY - hit.y
+                }
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val id = draggingImageId ?: return true
+                onImageMove(id, worldX - imageDragOffsetX, worldY - imageDragOffsetY)
+                dryView.invalidate()
+                return true
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                if (draggingImageId != null) onImageTransformEnd()
+                draggingImageId = null
+                requestDisallowInterceptTouchEvent(false)
+                dryView.invalidate()
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                if (draggingImageId != null) onImageTransformCancel()
+                draggingImageId = null
+                requestDisallowInterceptTouchEvent(false)
+                dryView.invalidate()
+                return true
+            }
+            else -> return true
+        }
+    }
+
+    private fun finishEraserGesture() {
+        if (!eraserGestureActive) return
+        eraserGestureActive = false
+        onEraseEnd()
     }
 
     private fun sample(event: MotionEvent, pointerIndex: Int, scale: Float) = InkSample(
@@ -177,8 +293,16 @@ class InkPageView(context: Context) : FrameLayout(context) {
         private val renderer = CanvasStrokeRenderer.create()
         private val transform = Matrix()
         private val paperPaint = Paint().apply { color = Color.WHITE }
+        private val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        private val selectionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.rgb(25, 118, 210)
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+        }
         var page: PageSession? = null
         var backgroundBitmap: Bitmap? = null
+        var imageBitmaps: Map<String, Bitmap> = emptyMap()
+        var toolProvider: () -> ToolMode = { ToolMode.PEN }
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
@@ -188,9 +312,26 @@ class InkPageView(context: Context) : FrameLayout(context) {
             }
             val current = page ?: return
             val scale = contentScale()
+
+            current.images.forEach { image ->
+                val bitmap = imageBitmaps[image.entryName] ?: return@forEach
+                val rect = imageRect(image, scale)
+                canvas.drawBitmap(bitmap, null, rect, imagePaint)
+                if (toolProvider() == ToolMode.IMAGE && current.selectedImageId == image.id) {
+                    canvas.drawRect(rect, selectionPaint)
+                }
+            }
+
             transform.reset()
             transform.setScale(scale, scale)
             current.strokes.forEach { renderer.draw(canvas, it.stroke, transform) }
         }
+
+        private fun imageRect(image: PageImage, scale: Float) = RectF(
+            image.x * scale,
+            image.y * scale,
+            (image.x + image.width) * scale,
+            (image.y + image.height) * scale,
+        )
     }
 }
