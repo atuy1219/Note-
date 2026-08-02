@@ -1,0 +1,136 @@
+               page.addImage(imported.image)
+                toolMode = ToolMode.IMAGE
+                markDirty(session)
+            }
+        }
+    }
+
+    fun openNote(noteId: String) {
+        openTabs.firstOrNull { it.id == noteId }?.let {
+            activeNoteId = it.id
+            return
+        }
+        viewModelScope.launch { runBusy { openNoteNow(noteId) } }
+    }
+
+    private suspend fun openNoteNow(noteId: String) {
+        openTabs.firstOrNull { it.id == noteId }?.let {
+            activeNoteId = it.id
+            return
+        }
+        val session = repository.loadSession(noteId)
+        openTabs += session
+        activeNoteId = session.id
+    }
+
+    fun activateTab(noteId: String) {
+        if (openTabs.any { it.id == noteId }) activeNoteId = noteId
+    }
+
+    fun closeTab(noteId: String) {
+        viewModelScope.launch {
+            val index = openTabs.indexOfFirst { it.id == noteId }
+            if (index < 0) return@launch
+            val session = openTabs[index]
+            if (session.dirty) saveNow(session)
+            session.imageBitmaps.values.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }
+            openTabs.removeAt(index)
+            if (activeNoteId == noteId) activeNoteId = openTabs.getOrNull((index - 1).coerceAtLeast(0))?.id
+        }
+    }
+
+    fun showLibrary() { activeNoteId = null }
+
+    fun setTool(mode: ToolMode) {
+        toolMode = mode
+        if (mode != ToolMode.IMAGE) activePage?.selectImage(null)
+        if (mode != ToolMode.LASSO) activePage?.clearStrokeSelection()
+    }
+
+    fun toggleEraser() {
+        setTool(if (toolMode == ToolMode.ERASER) ToolMode.PEN else ToolMode.ERASER)
+    }
+
+    fun updateBrush(colorArgb: Int = brushSpec.colorArgb, size: Float = brushSpec.size) {
+        brushSpec = brushSpec.copy(colorArgb = colorArgb, size = size)
+        setTool(ToolMode.PEN)
+    }
+
+    fun toggleScrollAxis() {
+        scrollAxis = if (scrollAxis == ScrollAxis.VERTICAL) ScrollAxis.HORIZONTAL else ScrollAxis.VERTICAL
+    }
+
+    fun setNavigationGestureMode(mode: NavigationGestureMode) {
+        navigationGestureModeState = mode
+        preferences.edit().putString("navigation_gesture", mode.name).apply()
+    }
+
+    fun setEraserMode(mode: EraserMode) {
+        eraserModeState = mode
+        preferences.edit().putString("eraser_mode", mode.name).apply()
+        setTool(ToolMode.ERASER)
+    }
+
+    fun activatePage(index: Int) { activeSession?.activePageIndex = index.coerceAtLeast(0) }
+
+    fun addPage() {
+        val session = activeSession ?: return
+        session.pages += PageSession(com.atuy.note.data.PageDocument())
+        session.activePageIndex = session.pages.lastIndex
+        markDirty(session)
+    }
+
+    fun addStroke(page: PageSession, runtime: RuntimeStroke) {
+        page.add(runtime)
+        markDirty()
+    }
+
+    fun beginErase(page: PageSession) { page.beginEraseGesture() }
+    fun eraseAt(page: PageSession, x: Float, y: Float, radius: Float) { page.eraseAt(x, y, radius, eraserMode) }
+    fun endErase(page: PageSession) { if (page.endEraseGesture()) markDirty() }
+
+    fun selectWithLasso(page: PageSession, lasso: Stroke) {
+        val count = page.selectWithLasso(lasso.inputs)
+        statusMessage = if (count == 0) "選択なし" else "$count 本の線を選択"
+    }
+
+    fun beginSelectedStrokeTransform(page: PageSession): Boolean = page.beginSelectedStrokeTransform()
+    fun moveSelectedStrokes(page: PageSession, dx: Float, dy: Float) { page.transformSelectedStrokes(dx, dy) }
+    fun endSelectedStrokeTransform(page: PageSession) { if (page.endSelectedStrokeTransform()) markDirty() }
+    fun cancelSelectedStrokeTransform(page: PageSession) { page.cancelSelectedStrokeTransform() }
+
+    fun scaleSelectedStrokes(factor: Float) {
+        val page = activePage ?: return
+        if (page.scaleSelectedStrokes(factor)) markDirty()
+    }
+
+    fun deleteSelectedStrokes() {
+        val page = activePage ?: return
+        if (page.deleteSelectedStrokes()) markDirty()
+    }
+
+    fun selectImage(page: PageSession, imageId: String?) {
+        page.selectImage(imageId)
+        if (imageId != null) toolMode = ToolMode.IMAGE
+    }
+
+    fun beginImageTransform(page: PageSession, imageId: String): Boolean = page.beginImageTransform(imageId)
+    fun moveImage(page: PageSession, imageId: String, x: Float, y: Float) { page.moveImage(imageId, x, y) }
+    fun endImageTransform(page: PageSession) { if (page.endImageTransform()) markDirty() }
+    fun cancelImageTransform(page: PageSession) { page.cancelImageTransform() }
+
+    fun scaleSelectedImage(factor: Float) {
+        val page = activePage ?: return
+        if (page.scaleSelectedImage(factor)) markDirty()
+    }
+
+    fun deleteSelectedImage() {
+        val page = activePage ?: return
+        if (page.deleteSelectedImage() != null) markDirty()
+    }
+
+    fun undo() { if (activePage?.undo() == true) markDirty() }
+    fun redo() { if (activePage?.redo() == true) markDirty() }
+
+    fun saveActive() {
+        activeSession?.
