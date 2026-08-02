@@ -25,6 +25,8 @@ jobs:
           cat scripts/.payload/models.* | base64 -d > app/src/main/java/com/atuy/note/data/Models.kt
           cat scripts/.payload_text/ink.* > app/src/main/java/com/atuy/note/ink/InkPageView.kt
           cat scripts/.payload_text/vm.* > app/src/main/java/com/atuy/note/MainViewModel.kt
+          sed -i 's/import androidx.ink.strokes.MeshCreation/import androidx.ink.strokes.createClosedShape/' app/src/main/java/com/atuy/note/data/Models.kt
+          sed -i 's/MeshCreation.createClosedShape(lassoInputs)/lassoInputs.createClosedShape()/' app/src/main/java/com/atuy/note/data/Models.kt
           cat scripts/.payload_text/apply.* > /tmp/apply_storage_lasso.py
           sed -i 's/^             Spacer(Modifier.width(6.dp))/            Spacer(Modifier.width(6.dp))/' /tmp/apply_storage_lasso.py
           python /tmp/apply_storage_lasso.py
