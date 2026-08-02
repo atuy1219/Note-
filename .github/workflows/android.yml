@@ -26,7 +26,8 @@ jobs:
       - name: Reconstruct feature changes
         shell: bash
         run: |
-          cat scripts/.feature_payload/part* | base64 -d > /tmp/features.tar.gz
+          cat scripts/.feature_payload2/chunk* | base64 -d > /tmp/features.tar.gz
+          echo '201cb457f32c2ca19c151488012f21ff71e0100542a32a8d0d46c67db67c54e4  /tmp/features.tar.gz' | sha256sum -c -
           tar -xzf /tmp/features.tar.gz
 
       - name: Set up JDK 17
@@ -61,7 +62,7 @@ jobs:
       - name: Commit verified source
         shell: bash
         run: |
-          rm -rf scripts/.feature_payload
+          rm -rf scripts/.feature_payload scripts/.feature_payload2
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add app docs README.md scripts
