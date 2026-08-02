@@ -56,7 +56,14 @@ class InkPageView(context: Context) : FrameLayout(context) {
             }
         },
     )
+    private sealed interface ViewportMutation {
+        data class Zoom(val scaleFactor: Float, val focusX: Float, val focusY: Float) : ViewportMutation
+        data class Pan(val dx: Float, val dy: Float) : ViewportMutation
+    }
+
     private val pointerStrokes = mutableMapOf<Int, InProgressStrokeId>()
+    private val pendingFinishedStrokeIds = mutableSetOf<InProgressStrokeId>()
+    private val pendingViewportMutations = ArrayDeque<ViewportMutation>()
     private val strokeBrushSpecs = mutableMapOf<InProgressStrokeId, BrushSpec>()
     private val lassoStrokeIds = mutableSetOf<InProgressStrokeId>()
     private val lassoBrush = Brush.createWithColorIntArgb(
@@ -125,9 +132,16 @@ class InkPageView(context: Context) : FrameLayout(context) {
                         onStrokeAdded(stroke.toRuntimeStroke(spec))
                     }
                 }
-                // The model update, dry invalidation, and wet removal must share one UI run loop.
-                dryView.invalidate()
-                wetView.removeFinishedStrokes(strokes.keys)
+                val finishedIds = strokes.keys.toSet()
+                // Keep the wet copy until the frame in which the newly committed dry stroke is drawn.
+                // Camera mutations are deferred during this handoff so both layers always share one view.
+                dryView.postInvalidateOnAnimation()
+                postOnAnimation {
+                    wetView.removeFinishedStrokes(finishedIds)
+                    pendingFinishedStrokeIds.removeAll(finishedIds)
+                    flushPendingViewportMutations()
+                    dryView.postInvalidateOnAnimation()
+                }
             }
         })
     }
@@ -369,9 +383,31 @@ class InkPageView(context: Context) : FrameLayout(context) {
     }
 
     private fun zoomAt(scaleFactor: Float, focusX: Float, focusY: Float) {
-        val currentPage = page ?: return
-        if (width <= 0 || height <= 0) return
-        val changed = viewport.zoomAt(
+        if (pendingFinishedStrokeIds.isNotEmpty()) {
+            pendingViewportMutations.addLast(ViewportMutation.Zoom(scaleFactor, focusX, focusY))
+            return
+        }
+        if (applyZoom(scaleFactor, focusX, focusY)) {
+            updateViewportMatrices()
+            dryView.postInvalidateOnAnimation()
+        }
+    }
+
+    private fun panViewport(dx: Float, dy: Float) {
+        if (pendingFinishedStrokeIds.isNotEmpty()) {
+            pendingViewportMutations.addLast(ViewportMutation.Pan(dx, dy))
+            return
+        }
+        if (applyPan(dx, dy)) {
+            updateViewportMatrices()
+            dryView.postInvalidateOnAnimation()
+        }
+    }
+
+    private fun applyZoom(scaleFactor: Float, focusX: Float, focusY: Float): Boolean {
+        val currentPage = page ?: return false
+        if (width <= 0 || height <= 0) return false
+        return viewport.zoomAt(
             scaleFactor = scaleFactor,
             focusX = focusX,
             focusY = focusY,
@@ -380,14 +416,11 @@ class InkPageView(context: Context) : FrameLayout(context) {
             viewWidth = width.toFloat(),
             viewHeight = height.toFloat(),
         )
-        if (!changed) return
-        updateViewportMatrices()
-        dryView.postInvalidateOnAnimation()
     }
 
-    private fun panViewport(dx: Float, dy: Float) {
-        val currentPage = page ?: return
-        if (width <= 0 || height <= 0) return
+    private fun applyPan(dx: Float, dy: Float): Boolean {
+        val currentPage = page ?: return false
+        if (width <= 0 || height <= 0) return false
         viewport.panBy(
             dx = dx,
             dy = dy,
@@ -396,8 +429,26 @@ class InkPageView(context: Context) : FrameLayout(context) {
             viewWidth = width.toFloat(),
             viewHeight = height.toFloat(),
         )
-        updateViewportMatrices()
-        dryView.postInvalidateOnAnimation()
+        return true
+    }
+
+    private fun flushPendingViewportMutations() {
+        if (pendingFinishedStrokeIds.isNotEmpty() || pendingViewportMutations.isEmpty()) return
+        var changed = false
+        while (pendingViewportMutations.isNotEmpty()) {
+            when (val mutation = pendingViewportMutations.removeFirst()) {
+                is ViewportMutation.Zoom -> {
+                    changed = applyZoom(mutation.scaleFactor, mutation.focusX, mutation.focusY) || changed
+                }
+                is ViewportMutation.Pan -> {
+                    changed = applyPan(mutation.dx, mutation.dy) || changed
+                }
+            }
+        }
+        if (changed) {
+            updateViewportMatrices()
+            dryView.postInvalidateOnAnimation()
+        }
     }
 
     private fun clampViewport() {
@@ -522,6 +573,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
                 pointerStrokes.remove(pointerId)?.let { id ->
+                    pendingFinishedStrokeIds += id
                     wetView.finishStroke(event, pointerId, id)
                 }
                 releaseParentIntercept()
