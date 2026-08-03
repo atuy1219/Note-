@@ -10,8 +10,9 @@ import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import com.atuy.note.sync.DRIVE_APPDATA_SCOPE
-import com.atuy.note.ui.NoteApp
+import com.atuy.note.ui.EnhancedNoteApp
 import com.atuy.note.ui.NoteTheme
+import com.atuy.note.ui.rememberUiPreferencesState
 import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.common.api.Scope
@@ -43,9 +44,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            NoteTheme {
-                NoteApp(
+            val uiPreferences = rememberUiPreferencesState()
+            NoteTheme(themeMode = uiPreferences.themeMode) {
+                EnhancedNoteApp(
                     viewModel = viewModel,
+                    uiPreferences = uiPreferences,
                     onImportPdf = { pdfPicker.launch(arrayOf("application/pdf")) },
                     onImportImage = { imagePicker.launch(arrayOf("image/*")) },
                     onSyncDrive = ::authorizeDrive,
