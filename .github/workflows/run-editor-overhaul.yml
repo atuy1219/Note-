@@ -21,30 +21,20 @@ jobs:
           ref: agent/editor-ui-overhaul
           fetch-depth: 0
 
-      - name: Materialize verified editor source
+      - name: Apply compiler fix
         shell: bash
         run: |
-          if [ -d .github/editor-payload ]; then
-            cat .github/editor-payload/part* > /tmp/enhanced.b64
-            echo '4f75db235a4f4b661906d576599c8536f084037f678445ffe347b80a095efa88  /tmp/enhanced.b64' | sha256sum -c -
-            base64 -d /tmp/enhanced.b64 | gzip -d > app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt
-          fi
+          sed -i 's/androidx\.compose\.foundation\.shape\.RectangleShape/androidx.compose.ui.graphics.RectangleShape/g' app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt
           git diff --check
 
-      - name: Persist materialized source
+      - name: Persist compiler fix
         shell: bash
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt
-          if [ -d .github/editor-payload ]; then
-            git rm -r .github/editor-payload
-          fi
-          if [ -f .github/workflows/apply-editor-overhaul.yml ]; then
-            git rm .github/workflows/apply-editor-overhaul.yml
-          fi
           if ! git diff --cached --quiet; then
-            git commit -m 'Implement floating editor UI and shared page zoom'
+            git commit -m 'Fix Compose rectangle shape reference'
             git push origin HEAD:agent/editor-ui-overhaul
           fi
 
