@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "com.atuy.note"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.atuy.note"
