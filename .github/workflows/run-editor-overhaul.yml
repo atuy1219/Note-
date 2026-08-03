@@ -6,6 +6,11 @@ on:
       - main
     paths:
       - .github/workflows/run-editor-overhaul.yml
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
 
 permissions:
   contents: write
