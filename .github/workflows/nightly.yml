@@ -35,7 +35,7 @@ jobs:
         run: sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0'
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@v6.2.0
         with:
           gradle-version: '9.5.0'
 
