@@ -714,7 +714,7 @@ private fun EditorSettingsScreen(
                         ThemeMode.entries.forEach { mode ->
                             FilterChip(
                                 selected = uiPreferences.themeMode == mode,
-                                onClick = { uiPreferences.setThemeMode(mode) },
+                                onClick = { uiPreferences.updateThemeMode(mode) },
                                 label = {
                                     Text(
                                         when (mode) {
@@ -734,12 +734,12 @@ private fun EditorSettingsScreen(
                     ChoiceRow {
                         FilterChip(
                             selected = uiPreferences.tabLayoutMode == TabLayoutMode.HORIZONTAL,
-                            onClick = { uiPreferences.setTabLayoutMode(TabLayoutMode.HORIZONTAL) },
+                            onClick = { uiPreferences.updateTabLayoutMode(TabLayoutMode.HORIZONTAL) },
                             label = { Text("横タブ") },
                         )
                         FilterChip(
                             selected = uiPreferences.tabLayoutMode == TabLayoutMode.VERTICAL,
-                            onClick = { uiPreferences.setTabLayoutMode(TabLayoutMode.VERTICAL) },
+                            onClick = { uiPreferences.updateTabLayoutMode(TabLayoutMode.VERTICAL) },
                             label = { Text("縦タブ") },
                         )
                     }
