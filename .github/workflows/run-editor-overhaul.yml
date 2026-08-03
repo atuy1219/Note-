@@ -21,20 +21,22 @@ jobs:
           ref: agent/editor-ui-overhaul
           fetch-depth: 0
 
-      - name: Apply compiler fix
+      - name: Apply compiler fixes
         shell: bash
         run: |
           sed -i 's/androidx\.compose\.foundation\.shape\.RectangleShape/androidx.compose.ui.graphics.RectangleShape/g' app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt
+          sed -i 's/\.setThemeMode(/.updateThemeMode(/g' app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt
+          sed -i 's/\.setTabLayoutMode(/.updateTabLayoutMode(/g' app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt
           git diff --check
 
-      - name: Persist compiler fix
+      - name: Persist compiler fixes
         shell: bash
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt
           if ! git diff --cached --quiet; then
-            git commit -m 'Fix Compose rectangle shape reference'
+            git commit -m 'Fix editor preference method references'
             git push origin HEAD:agent/editor-ui-overhaul
           fi
 
