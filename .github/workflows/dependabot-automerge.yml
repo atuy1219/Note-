@@ -1,0 +1,58 @@
+name: Dependabot auto-merge
+
+on:
+  workflow_run:
+    workflows:
+      - Android CI
+    types:
+      - completed
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Merge successful Dependabot pull request
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          TESTED_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          pr_number="$({
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${REPOSITORY}/commits/${TESTED_HEAD_SHA}/pulls" \
+              --jq '.[] | select(.state == "open" and .user.login == "dependabot[bot]") | .number'
+          } | head -n 1)"
+
+          if [[ -z "${pr_number}" ]]; then
+            echo "No open Dependabot pull request is associated with ${TESTED_HEAD_SHA}."
+            exit 0
+          fi
+
+          current_head_sha="$(
+            gh pr view "${pr_number}" \
+              --repo "${REPOSITORY}" \
+              --json headRefOid \
+              --jq '.headRefOid'
+          )"
+
+          if [[ "${current_head_sha}" != "${TESTED_HEAD_SHA}" ]]; then
+            echo "PR #${pr_number} changed after this CI run; waiting for CI on the new head."
+            exit 0
+          fi
+
+          gh pr merge "${pr_number}" \
+            --repo "${REPOSITORY}" \
+            --squash \
+            --delete-branch
