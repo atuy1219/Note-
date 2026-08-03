@@ -1,5 +1,6 @@
 name: Nightly APKs
 
+# Manual nightly trigger: 2026-08-03T22:39:00+09:00
 on:
   push:
     branches:
