@@ -10,7 +10,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 
-// UI preferences shared by the editor and activity theme.
+// Persistent UI preferences shared by the editor and activity theme.
 enum class ThemeMode {
     SYSTEM,
     LIGHT,
