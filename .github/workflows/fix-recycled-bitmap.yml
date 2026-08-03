@@ -39,54 +39,44 @@ jobs:
           replace_once(note_app, "import androidx.compose.runtime.DisposableEffect\n", "")
           replace_once(
               note_app,
-              '''                        DisposableEffect(preview) {
-                            onDispose { preview?.let { if (!it.isRecycled) it.recycle() } }
-                        }
-''',
-              '''                        // Compose and the hardware renderer may retain this Bitmap in a
-                        // recorded display list after the composable leaves composition. Explicitly
-                        // recycling it here can race the next draw; allow GC to reclaim it instead.
-''',
+              "                        DisposableEffect(preview) {\n"
+              "                            onDispose { preview?.let { if (!it.isRecycled) it.recycle() } }\n"
+              "                        }\n",
+              "                        // Compose and the hardware renderer may retain this Bitmap in a\n"
+              "                        // recorded display list after the composable leaves composition. Explicitly\n"
+              "                        // recycling it here can race the next draw; allow GC to reclaim it instead.\n",
           )
 
           replace_once(
               main_vm,
-              '''            session.imageBitmaps.values.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }
-            openTabs.removeAt(index)
-''',
-              '''            // Do not recycle UI-visible bitmaps here. The outgoing AndroidView or a
-            // hardware display list can still reference them for one or more frames.
-            openTabs.removeAt(index)
-''',
+              "            session.imageBitmaps.values.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }\n"
+              "            openTabs.removeAt(index)\n",
+              "            // Do not recycle UI-visible bitmaps here. The outgoing AndroidView or a\n"
+              "            // hardware display list can still reference them for one or more frames.\n"
+              "            openTabs.removeAt(index)\n",
           )
           replace_once(
               main_vm,
-              '''                session.imageBitmaps.values.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }
-                val index = openTabs.indexOfFirst { it.id == session.id }
-''',
-              '''                // Bitmap lifetime follows the session references; explicit recycle can
-                // race the final frame of the editor while it leaves composition.
-                val index = openTabs.indexOfFirst { it.id == session.id }
-''',
+              "                session.imageBitmaps.values.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }\n"
+              "                val index = openTabs.indexOfFirst { it.id == session.id }\n",
+              "                // Bitmap lifetime follows the session references; explicit recycle can\n"
+              "                // race the final frame of the editor while it leaves composition.\n"
+              "                val index = openTabs.indexOfFirst { it.id == session.id }\n",
           )
 
           replace_once(
               ink_view,
-              '''            backgroundBitmap?.let { bitmap ->
-                canvas.drawBitmap(bitmap, null, RectF(0f, 0f, current.width, current.height), imagePaint)
-            }
-''',
-              '''            backgroundBitmap?.takeUnless { it.isRecycled }?.let { bitmap ->
-                canvas.drawBitmap(bitmap, null, RectF(0f, 0f, current.width, current.height), imagePaint)
-            }
-''',
+              "            backgroundBitmap?.let { bitmap ->\n"
+              "                canvas.drawBitmap(bitmap, null, RectF(0f, 0f, current.width, current.height), imagePaint)\n"
+              "            }\n",
+              "            backgroundBitmap?.takeUnless { it.isRecycled }?.let { bitmap ->\n"
+              "                canvas.drawBitmap(bitmap, null, RectF(0f, 0f, current.width, current.height), imagePaint)\n"
+              "            }\n",
           )
           replace_once(
               ink_view,
-              '''                val bitmap = imageBitmaps[image.entryName] ?: return@forEach
-''',
-              '''                val bitmap = imageBitmaps[image.entryName]?.takeUnless { it.isRecycled } ?: return@forEach
-''',
+              "                val bitmap = imageBitmaps[image.entryName] ?: return@forEach\n",
+              "                val bitmap = imageBitmaps[image.entryName]?.takeUnless { it.isRecycled } ?: return@forEach\n",
           )
           PY
 
