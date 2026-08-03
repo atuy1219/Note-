@@ -10,8 +10,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 
-enum class ThemeMode { SYSTEM, LIGHT, DARK }
-enum class TabLayoutMode { HORIZONTAL, VERTICAL }
+enum class ThemeMode {
+    SYSTEM,
+    LIGHT,
+    DARK,
+}
+
+enum class TabLayoutMode {
+    HORIZONTAL,
+    VERTICAL,
+}
 
 @Stable
 class UiPreferencesState internal constructor(
