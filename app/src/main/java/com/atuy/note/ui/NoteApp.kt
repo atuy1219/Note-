@@ -87,7 +87,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -879,9 +878,9 @@ private fun PageOverviewDialog(
                         val preview by produceState<Bitmap?>(initialValue = null, session.id, page.id, page.contentVersion) {
                             value = viewModel.renderPagePreview(session, page, 360)
                         }
-                        DisposableEffect(preview) {
-                            onDispose { preview?.let { if (!it.isRecycled) it.recycle() } }
-                        }
+                        // Compose and the hardware renderer may retain this Bitmap in a
+                        // recorded display list after the composable leaves composition. Explicitly
+                        // recycling it here can race the next draw; allow GC to reclaim it instead.
                         Card(
                             onClick = { onOpenPage(index) },
                             colors = CardDefaults.cardColors(

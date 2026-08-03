@@ -726,11 +726,11 @@ class InkPageView(context: Context) : FrameLayout(context) {
             canvas.save()
             canvas.concat(transform)
             canvas.drawRect(0f, 0f, current.width, current.height, paperPaint)
-            backgroundBitmap?.let { bitmap ->
+            backgroundBitmap?.takeUnless { it.isRecycled }?.let { bitmap ->
                 canvas.drawBitmap(bitmap, null, RectF(0f, 0f, current.width, current.height), imagePaint)
             }
             current.images.forEach { image ->
-                val bitmap = imageBitmaps[image.entryName] ?: return@forEach
+                val bitmap = imageBitmaps[image.entryName]?.takeUnless { it.isRecycled } ?: return@forEach
                 val rect = RectF(image.x, image.y, image.x + image.width, image.y + image.height)
                 canvas.drawBitmap(bitmap, null, rect, imagePaint)
                 if (toolProvider() == ToolMode.IMAGE && current.selectedImageId == image.id) {

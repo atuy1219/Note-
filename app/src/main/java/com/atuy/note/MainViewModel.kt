@@ -177,7 +177,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (index < 0) return@launch
             val session = openTabs[index]
             if (session.dirty) saveNow(session)
-            session.imageBitmaps.values.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }
+            // Do not recycle UI-visible bitmaps here. The outgoing AndroidView or a
+            // hardware display list can still reference them for one or more frames.
             openTabs.removeAt(index)
             if (activeNoteId == noteId) activeNoteId = openTabs.getOrNull((index - 1).coerceAtLeast(0))?.id
         }
@@ -199,7 +200,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runBusy {
                 saveJobs.remove(session.id)?.cancel()
                 library = repository.deleteNote(session.id, library)
-                session.imageBitmaps.values.forEach { bitmap -> if (!bitmap.isRecycled) bitmap.recycle() }
+                // Bitmap lifetime follows the session references; explicit recycle can
+                // race the final frame of the editor while it leaves composition.
                 val index = openTabs.indexOfFirst { it.id == session.id }
                 openTabs.removeAll { it.id == session.id }
                 activeNoteId = openTabs.getOrNull(index.coerceAtMost(openTabs.lastIndex))?.id
