@@ -1,0 +1,40 @@
+name: Sync editor branch
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - synchronize
+
+permissions:
+  contents: write
+
+jobs:
+  sync-and-cleanup:
+    if: github.head_ref == 'agent/editor-ui-overhaul'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: agent/editor-ui-overhaul
+          fetch-depth: 0
+
+      - name: Merge current main and remove temporary workflow
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin main agent/editor-ui-overhaul
+          git checkout -B agent/editor-ui-overhaul origin/agent/editor-ui-overhaul
+          git merge --no-edit origin/main
+
+          git checkout -B cleanup-main origin/main
+          git rm .github/workflows/sync-editor-branch.yml
+          git commit -m 'Remove temporary branch sync workflow'
+          git push origin HEAD:main
+
+          git checkout agent/editor-ui-overhaul
+          git fetch origin main
+          git merge --no-edit origin/main
+          git push origin HEAD:agent/editor-ui-overhaul
