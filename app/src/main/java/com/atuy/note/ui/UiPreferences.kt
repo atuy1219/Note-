@@ -32,12 +32,12 @@ class UiPreferencesState internal constructor(
     var tabLayoutMode by mutableStateOf(enumPreference(KEY_TAB_LAYOUT, TabLayoutMode.HORIZONTAL))
         private set
 
-    fun setThemeMode(mode: ThemeMode) {
+    fun updateThemeMode(mode: ThemeMode) {
         themeMode = mode
         preferences.edit().putString(KEY_THEME, mode.name).apply()
     }
 
-    fun setTabLayoutMode(mode: TabLayoutMode) {
+    fun updateTabLayoutMode(mode: TabLayoutMode) {
         tabLayoutMode = mode
         preferences.edit().putString(KEY_TAB_LAYOUT, mode.name).apply()
     }
