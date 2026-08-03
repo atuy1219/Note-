@@ -938,7 +938,7 @@ private fun ZoomPage(
         modifier = modifier,
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White),
-        shape = androidx.compose.foundation.shape.RectangleShape,
+        shape = androidx.compose.ui.graphics.RectangleShape,
     ) {
         Box(
             Modifier.fillMaxWidth().aspectRatio(page.width / page.height)
