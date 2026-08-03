@@ -11,6 +11,7 @@ on:
       - main
     types:
       - opened
+      - synchronize
 
 permissions:
   contents: write
@@ -31,16 +32,17 @@ jobs:
           python3 - <<'PY'
           import base64
           import gzip
-          import re
           from pathlib import Path
 
-          workflow = Path('.github/workflows/apply-editor-overhaul.yml').read_text()
-          match = re.search(r"printf '%s' '([^']+)' \\| base64 -d", workflow)
-          if match is None:
-              raise SystemExit('Embedded editor payload not found')
+          workflow_path = Path('.github/workflows/apply-editor-overhaul.yml')
+          if not workflow_path.exists():
+              raise SystemExit(0)
+          workflow = workflow_path.read_text()
+          line = next(line for line in workflow.splitlines() if "printf '%s' '" in line and "| base64 -d | gzip -d" in line)
+          payload = line.split("printf '%s' '", 1)[1].split("' | base64 -d", 1)[0]
           target = Path('app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt')
           target.parent.mkdir(parents=True, exist_ok=True)
-          target.write_bytes(gzip.decompress(base64.b64decode(match.group(1))))
+          target.write_bytes(gzip.decompress(base64.b64decode(payload)))
           PY
           git diff --check
 
@@ -70,9 +72,13 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt
-          git rm .github/workflows/apply-editor-overhaul.yml
-          git commit -m 'Implement floating editor UI and shared page zoom'
-          git push origin HEAD:agent/editor-ui-overhaul
+          if [ -f .github/workflows/apply-editor-overhaul.yml ]; then
+            git rm .github/workflows/apply-editor-overhaul.yml
+          fi
+          if ! git diff --cached --quiet; then
+            git commit -m 'Implement floating editor UI and shared page zoom'
+            git push origin HEAD:agent/editor-ui-overhaul
+          fi
 
       - name: Remove temporary main workflow
         if: success()
@@ -80,6 +86,8 @@ jobs:
         run: |
           git fetch origin main
           git checkout -B cleanup-main origin/main
-          git rm .github/workflows/run-editor-overhaul.yml
-          git commit -m 'Remove temporary editor build workflow'
-          git push origin HEAD:main
+          if [ -f .github/workflows/run-editor-overhaul.yml ]; then
+            git rm .github/workflows/run-editor-overhaul.yml
+            git commit -m 'Remove temporary editor build workflow'
+            git push origin HEAD:main
+          fi
