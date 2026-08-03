@@ -3,8 +3,8 @@ updates:
   - package-ecosystem: gradle
     directory: /
     schedule:
-      interval: daily
-      time: "03:00"
+      interval: cron
+      cronjob: "0 3 * * *"
       timezone: Asia/Tokyo
     open-pull-requests-limit: 50
     rebase-strategy: auto
@@ -18,8 +18,8 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: daily
-      time: "03:30"
+      interval: cron
+      cronjob: "30 3 * * *"
       timezone: Asia/Tokyo
     open-pull-requests-limit: 50
     rebase-strategy: auto
