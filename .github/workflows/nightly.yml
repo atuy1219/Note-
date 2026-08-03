@@ -57,6 +57,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
+          APKSIGNER="$ANDROID_HOME/build-tools/37.0.0/apksigner"
+          test -x "$APKSIGNER"
+
           keytool -genkeypair -v \
             -keystore nightly.keystore \
             -storepass android \
@@ -70,13 +73,13 @@ jobs:
           while IFS= read -r apk; do
             base="$(basename "$apk")"
             output="dist/${base/-unsigned/}"
-            apksigner sign \
+            "$APKSIGNER" sign \
               --ks nightly.keystore \
               --ks-pass pass:android \
               --key-pass pass:android \
               --out "$output" \
               "$apk"
-            apksigner verify "$output"
+            "$APKSIGNER" verify "$output"
           done < <(find app/build/outputs/apk/release -name '*-unsigned.apk' -type f | sort)
 
           while IFS= read -r apk; do
