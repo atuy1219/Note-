@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.DashPathEffect
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.PointF
 import android.graphics.RectF
 import android.view.MotionEvent
@@ -22,6 +23,7 @@ import androidx.ink.rendering.android.canvas.CanvasStrokeRenderer
 import androidx.ink.strokes.Stroke
 import androidx.input.motionprediction.MotionEventPredictor
 import com.atuy.note.data.BrushSpec
+import com.atuy.note.data.InkSample
 import com.atuy.note.data.NavigationGestureMode
 import com.atuy.note.data.PageSession
 import com.atuy.note.data.RuntimeStroke
@@ -69,7 +71,20 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private val pendingViewportMutations = ArrayDeque<ViewportMutation>()
     private val strokeBrushSpecs = mutableMapOf<InProgressStrokeId, BrushSpec>()
     private val lassoStrokeIds = mutableSetOf<InProgressStrokeId>()
-    private val pendingCircleLasso = mutableMapOf<String, Runnable>()
+    private data class CircleLassoCandidate(
+        val strokeId: String,
+        val stroke: Stroke,
+        val samples: List<InkSample>,
+    )
+
+    private var circleLassoCandidate: CircleLassoCandidate? = null
+    private var circleHoldRunnable: Runnable? = null
+    private var circleHoldPointerId: Int? = null
+    private var circleHoldStartX = 0f
+    private var circleHoldStartY = 0f
+    private var circleHoldGestureActive = false
+    private var circleHoldCancelled = false
+    private var lassoOutline: List<PointF> = emptyList()
     private val lassoBrush = Brush.createWithColorIntArgb(
         StockBrushes.dashedLine(),
         0xFF1976D2.toInt(),
@@ -133,18 +148,18 @@ class InkPageView(context: Context) : FrameLayout(context) {
             override fun onStrokesFinished(strokes: Map<InProgressStrokeId, Stroke>) {
                 strokes.forEach { (id, stroke) ->
                     if (lassoStrokeIds.remove(id)) {
+                        lassoOutline = stroke.toRuntimeStroke(BrushSpec()).samples.map { PointF(it.x, it.y) }
                         onLassoFinished(stroke)
                     } else {
                         val spec = strokeBrushSpecs.remove(id) ?: brushProvider()
                         val runtime = stroke.toRuntimeStroke(spec)
                         onStrokeAdded(runtime)
-                        if (circleToLassoEnabledProvider() && looksLikeClosedLoop(runtime)) {
-                            val runnable = Runnable {
-                                pendingCircleLasso.remove(runtime.stored.id)
-                                onCircleHoldLasso(runtime.stored.id, stroke)
-                            }
-                            pendingCircleLasso[runtime.stored.id] = runnable
-                            postDelayed(runnable, CIRCLE_TO_LASSO_DELAY_MS)
+                        circleLassoCandidate = if (
+                            circleToLassoEnabledProvider() && looksLikeClosedLoop(runtime)
+                        ) {
+                            CircleLassoCandidate(runtime.stored.id, stroke, runtime.samples)
+                        } else {
+                            null
                         }
                     }
                 }
@@ -192,6 +207,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
     ) {
         if (boundPageId != page.id) {
             cancelPendingCircleLasso()
+            circleLassoCandidate = null
+            lassoOutline = emptyList()
             boundPageId = page.id
             boundContentVersion = -1
             viewport.reset()
@@ -274,6 +291,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
             }
             return true
         }
+
+        if (actionIsStylus && handleCircleLassoHold(event, routedIndex)) return true
 
         if (!actionIsStylus) {
             if (stylusIndex != null) return true
@@ -531,6 +550,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 if (currentPage.isPointInsideStrokeSelection(point.x, point.y) && onSelectedTransformStart()) {
+                    lassoOutline = emptyList()
                     selectedDragActive = true
                     selectedDragStartX = point.x
                     selectedDragStartY = point.y
@@ -667,9 +687,79 @@ class InkPageView(context: Context) : FrameLayout(context) {
         }
     }
 
+    private fun handleCircleLassoHold(event: MotionEvent, pointerIndex: Int): Boolean {
+        if (circleHoldGestureActive) {
+            val pointerId = circleHoldPointerId
+            when (event.actionMasked) {
+                MotionEvent.ACTION_MOVE -> {
+                    val index = pointerId?.let(event::findPointerIndex) ?: -1
+                    if (index >= 0 && !circleHoldCancelled) {
+                        val point = mapViewToWorld(event.getX(index), event.getY(index))
+                        val distance = hypot(point.x - circleHoldStartX, point.y - circleHoldStartY)
+                        if (distance > CIRCLE_HOLD_SLOP / viewport.zoom) {
+                            circleHoldCancelled = true
+                            circleHoldRunnable?.let(::removeCallbacks)
+                            circleHoldRunnable = null
+                        }
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
+                    cancelPendingCircleLasso()
+                    releaseParentIntercept()
+                }
+            }
+            return true
+        }
+
+        if (event.actionMasked != MotionEvent.ACTION_DOWN &&
+            event.actionMasked != MotionEvent.ACTION_POINTER_DOWN
+        ) return false
+        if (!circleToLassoEnabledProvider() || toolProvider() != ToolMode.PEN) return false
+
+        val candidate = circleLassoCandidate ?: return false
+        val point = mapViewToWorld(event.getX(pointerIndex), event.getY(pointerIndex))
+        if (!isPointInsideClosedLoop(point.x, point.y, candidate.samples)) return false
+
+        requestDisallowInterceptTouchEvent(true)
+        onActivated()
+        circleHoldGestureActive = true
+        circleHoldCancelled = false
+        circleHoldPointerId = event.getPointerId(pointerIndex)
+        circleHoldStartX = point.x
+        circleHoldStartY = point.y
+        val runnable = Runnable {
+            if (!circleHoldGestureActive || circleHoldCancelled) return@Runnable
+            val current = circleLassoCandidate ?: return@Runnable
+            circleLassoCandidate = null
+            lassoOutline = current.samples.map { PointF(it.x, it.y) }
+            onCircleHoldLasso(current.strokeId, current.stroke)
+            dryView.postInvalidateOnAnimation()
+        }
+        circleHoldRunnable = runnable
+        postDelayed(runnable, CIRCLE_HOLD_DELAY_MS)
+        return true
+    }
+
     private fun cancelPendingCircleLasso() {
-        pendingCircleLasso.values.forEach(::removeCallbacks)
-        pendingCircleLasso.clear()
+        circleHoldRunnable?.let(::removeCallbacks)
+        circleHoldRunnable = null
+        circleHoldPointerId = null
+        circleHoldGestureActive = false
+        circleHoldCancelled = false
+    }
+
+    private fun isPointInsideClosedLoop(x: Float, y: Float, samples: List<InkSample>): Boolean {
+        if (samples.size < 3) return false
+        var inside = false
+        var previous = samples.last()
+        samples.forEach { current ->
+            val crosses = (current.y > y) != (previous.y > y) &&
+                x < (previous.x - current.x) * (y - current.y) /
+                (previous.y - current.y) + current.x
+            if (crosses) inside = !inside
+            previous = current
+        }
+        return inside
     }
 
     private fun looksLikeClosedLoop(runtime: RuntimeStroke): Boolean {
@@ -704,7 +794,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
     }
 
     private companion object {
-        const val CIRCLE_TO_LASSO_DELAY_MS = 1_200L
+        const val CIRCLE_HOLD_DELAY_MS = 650L
+        const val CIRCLE_HOLD_SLOP = 18f
         const val MIN_CIRCLE_DIAMETER = 72f
         const val MAX_CIRCLE_GAP = 28f
         const val MAX_CIRCLE_GAP_RATIO = 0.24f
@@ -758,17 +849,27 @@ class InkPageView(context: Context) : FrameLayout(context) {
             canvas.restore()
 
             if (toolProvider() == ToolMode.LASSO) {
-                current.selectedStrokeBounds()?.let { bounds ->
-                    val rect = RectF(bounds[0], bounds[1], bounds[2], bounds[3])
-                    transform.mapRect(rect)
-                    val padding = 10f
-                    canvas.drawRect(
-                        rect.left - padding,
-                        rect.top - padding,
-                        rect.right + padding,
-                        rect.bottom + padding,
-                        selectionPaint,
-                    )
+                if (lassoOutline.size >= 3 && current.selectedStrokeIds.isNotEmpty()) {
+                    val selectionPath = Path().apply {
+                        moveTo(lassoOutline.first().x, lassoOutline.first().y)
+                        lassoOutline.drop(1).forEach { lineTo(it.x, it.y) }
+                        close()
+                    }
+                    selectionPath.transform(transform)
+                    canvas.drawPath(selectionPath, selectionPaint)
+                } else {
+                    current.selectedStrokeBounds()?.let { bounds ->
+                        val rect = RectF(bounds[0], bounds[1], bounds[2], bounds[3])
+                        transform.mapRect(rect)
+                        val padding = 10f
+                        canvas.drawRect(
+                            rect.left - padding,
+                            rect.top - padding,
+                            rect.right + padding,
+                            rect.bottom + padding,
+                            selectionPaint,
+                        )
+                    }
                 }
             }
         }
