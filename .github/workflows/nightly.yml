@@ -19,7 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      NOTE_SIGNING_STORE_FILE: ${{ runner.temp }}/note-nightly.keystore
       NOTE_SIGNING_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
       NOTE_SIGNING_KEY_ALIAS: ${{ secrets.ALIAS }}
       NOTE_SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
@@ -50,6 +49,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
+          export NOTE_SIGNING_STORE_FILE="$RUNNER_TEMP/note-nightly.keystore"
+          echo "NOTE_SIGNING_STORE_FILE=$NOTE_SIGNING_STORE_FILE" >> "$GITHUB_ENV"
 
           if [[ -z "$SIGNING_KEY_STORE_BASE64" || -z "$NOTE_SIGNING_STORE_PASSWORD" || \
                 -z "$NOTE_SIGNING_KEY_ALIAS" || -z "$NOTE_SIGNING_KEY_PASSWORD" ]]; then
