@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 jobs:
-  materialize-build-cleanup:
+  build-fix-cleanup:
     if: github.head_ref == 'agent/material3-goodnotes-shell'
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -22,81 +22,22 @@ jobs:
           ref: agent/material3-goodnotes-shell
           fetch-depth: 0
 
-      - name: Materialize verified UI sources
+      - name: Apply compiler fix
         shell: bash
         run: |
-          cat .github/material3-payload/part* > /tmp/material3.b64
-          echo '5ff30c61487bae9d04c999bea4718950599179d74206d1b003467b0dcc4a522e  /tmp/material3.b64' | sha256sum -c -
-          base64 -d /tmp/material3.b64 > /tmp/material3.tar.gz
-          tar -xzf /tmp/material3.tar.gz
+          sed -i '/import androidx\.compose\.foundation\.layout\.weight/d' app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt
+          git diff --check
 
-      - name: Add read-only input routing
-        shell: python
-        run: |
-          from pathlib import Path
-
-          path = Path('app/src/main/java/com/atuy/note/ink/InkPageView.kt')
-          text = path.read_text()
-
-          replacements = [
-              (
-                  '    private var circleToLassoEnabledProvider: () -> Boolean = { false }\n'
-                  '    private var onNavigationPan: (Float, Float) -> Unit = { _, _ -> }',
-                  '    private var circleToLassoEnabledProvider: () -> Boolean = { false }\n'
-                  '    private var readOnlyProvider: () -> Boolean = { false }\n'
-                  '    private var onNavigationPan: (Float, Float) -> Unit = { _, _ -> }',
-              ),
-              (
-                  '        circleToLassoEnabledProvider: () -> Boolean,\n'
-                  '        onNavigationPan: (Float, Float) -> Unit,',
-                  '        circleToLassoEnabledProvider: () -> Boolean,\n'
-                  '        readOnlyProvider: () -> Boolean = { false },\n'
-                  '        onNavigationPan: (Float, Float) -> Unit,',
-              ),
-              (
-                  '        this.circleToLassoEnabledProvider = circleToLassoEnabledProvider\n'
-                  '        this.onNavigationPan = onNavigationPan',
-                  '        this.circleToLassoEnabledProvider = circleToLassoEnabledProvider\n'
-                  '        this.readOnlyProvider = readOnlyProvider\n'
-                  '        this.onNavigationPan = onNavigationPan',
-              ),
-              (
-                  '        val actionIsStylus = actionToolType == MotionEvent.TOOL_TYPE_STYLUS ||\n'
-                  '            actionToolType == MotionEvent.TOOL_TYPE_ERASER\n\n'
-                  '        if (!actionIsStylus) {',
-                  '        val actionIsStylus = actionToolType == MotionEvent.TOOL_TYPE_STYLUS ||\n'
-                  '            actionToolType == MotionEvent.TOOL_TYPE_ERASER\n\n'
-                  '        if (readOnlyProvider() && actionIsStylus) {\n'
-                  '            if (event.actionMasked == MotionEvent.ACTION_DOWN ||\n'
-                  '                event.actionMasked == MotionEvent.ACTION_POINTER_DOWN\n'
-                  '            ) {\n'
-                  '                onActivated()\n'
-                  '            }\n'
-                  '            return true\n'
-                  '        }\n\n'
-                  '        if (!actionIsStylus) {',
-              ),
-          ]
-
-          for old, new in replacements:
-              if old not in text:
-                  raise SystemExit(f'Expected InkPageView block not found: {old[:80]!r}')
-              text = text.replace(old, new, 1)
-
-          path.write_text(text)
-
-      - name: Persist implementation
+      - name: Persist compiler fix
         shell: bash
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt
-          git add app/src/main/java/com/atuy/note/ui/UiPreferences.kt
-          git add app/src/main/java/com/atuy/note/ink/InkPageView.kt
-          git rm -r .github/material3-payload
-          git diff --check
-          git commit -m 'Rebuild app shell and editor controls with Material 3'
-          git push origin HEAD:agent/material3-goodnotes-shell
+          if ! git diff --cached --quiet; then
+            git commit -m 'Fix Compose weight import'
+            git push origin HEAD:agent/material3-goodnotes-shell
+          fi
 
       - name: Set up JDK 17
         uses: actions/setup-java@v5.7.0
