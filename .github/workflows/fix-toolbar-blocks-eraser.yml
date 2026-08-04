@@ -13,6 +13,7 @@ jobs:
   fix-and-verify:
     if: github.head_ref == 'agent/fix-toolbar-block-order-eraser-icon'
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -54,20 +55,36 @@ jobs:
 
           path.write_text(text)
 
-      - uses: actions/setup-java@v5
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5.7.0
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
 
       - name: Install Android SDK 37
-        run: yes | sdkmanager 'platforms;android-37' 'build-tools;36.0.0'
+        run: sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0'
 
-      - uses: gradle/actions/setup-gradle@v5
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6.2.0
+        with:
+          gradle-version: '9.5.0'
 
       - name: Build and test
-        run: ./gradlew :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest --stacktrace
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if gradle :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest --stacktrace; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Gradle attempt $attempt failed; retrying dependency resolution..."
+              sleep $((attempt * 20))
+            fi
+          done
+          exit 1
 
       - name: Persist fix
         run: |
