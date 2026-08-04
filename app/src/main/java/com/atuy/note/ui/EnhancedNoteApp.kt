@@ -56,6 +56,7 @@ import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.AutoFixNormal
 import androidx.compose.material.icons.filled.BorderColor
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Category
@@ -1200,7 +1201,7 @@ private fun EditorCommandBar(
         }
     }
     val eraser = CommandSpec(
-        Icons.Default.DeleteOutline,
+        Icons.Default.AutoFixNormal,
         "消しゴム",
         !readOnly && viewModel.toolMode == ToolMode.ERASER,
     ) {
@@ -1275,8 +1276,8 @@ private fun EditorCommandBar(
                     val beforeHeight = COMMAND_EXTENT * toolsBeforeLasso.size.toFloat()
                     val afterHeight = COMMAND_EXTENT * toolsAfterLasso.size.toFloat()
                     Box(Modifier.width(COMMAND_EXTENT).fillMaxHeight().padding(vertical = 6.dp)) {
-                        CommandColumn(detailBlock, Modifier.align(Alignment.TopCenter))
-                        CommandColumn(pageBlock, Modifier.align(Alignment.BottomCenter))
+                        CommandColumn(pageBlock, Modifier.align(Alignment.TopCenter))
+                        CommandColumn(detailBlock, Modifier.align(Alignment.BottomCenter))
                         CommandColumn(
                             toolsBeforeLasso,
                             Modifier.align(Alignment.Center).offset(
@@ -1297,13 +1298,13 @@ private fun EditorCommandBar(
                             .padding(vertical = 6.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        CommandColumn(detailBlock)
+                        CommandColumn(pageBlock)
                         Spacer(Modifier.height(14.dp))
                         CommandColumn(toolsBeforeLasso)
                         CommandButton(lasso)
                         CommandColumn(toolsAfterLasso)
                         Spacer(Modifier.height(14.dp))
-                        CommandColumn(pageBlock)
+                        CommandColumn(detailBlock)
                     }
                 }
             } else {
@@ -1311,8 +1312,8 @@ private fun EditorCommandBar(
                     val beforeWidth = COMMAND_EXTENT * toolsBeforeLasso.size.toFloat()
                     val afterWidth = COMMAND_EXTENT * toolsAfterLasso.size.toFloat()
                     Box(Modifier.fillMaxWidth().height(COMMAND_EXTENT).padding(horizontal = 8.dp)) {
-                        CommandRow(detailBlock, Modifier.align(Alignment.CenterStart))
-                        CommandRow(pageBlock, Modifier.align(Alignment.CenterEnd))
+                        CommandRow(pageBlock, Modifier.align(Alignment.CenterStart))
+                        CommandRow(detailBlock, Modifier.align(Alignment.CenterEnd))
                         CommandRow(
                             toolsBeforeLasso,
                             Modifier.align(Alignment.Center).offset(
@@ -1333,13 +1334,13 @@ private fun EditorCommandBar(
                             .horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        CommandRow(detailBlock)
+                        CommandRow(pageBlock)
                         Spacer(Modifier.width(14.dp))
                         CommandRow(toolsBeforeLasso)
                         CommandButton(lasso)
                         CommandRow(toolsAfterLasso)
                         Spacer(Modifier.width(14.dp))
-                        CommandRow(pageBlock)
+                        CommandRow(detailBlock)
                     }
                 }
             }
