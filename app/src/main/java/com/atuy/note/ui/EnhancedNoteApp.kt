@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -180,7 +181,7 @@ fun EnhancedNoteApp(
         showHomeSettings = false
     }
 
-    Box(Modifier.fillMaxSize()) {
+    Box(Modifier.fillMaxSize().statusBarsPadding()) {
         AppFrame(
             viewModel = viewModel,
             uiPreferences = uiPreferences,
@@ -847,14 +848,20 @@ private fun EditorCommandBar(
     onPanel: (EditorPanel) -> Unit,
 ) {
     val buttons = listOf(
-        CommandSpec(Icons.Default.Menu, "ページ一覧", showPages, onTogglePages),
+        CommandSpec(Icons.Default.Menu, "ページ一覧", showPages, onClick = onTogglePages),
         CommandSpec(Icons.Default.Search, "検索", activePanel == EditorPanel.SEARCH) {
             onPanel(EditorPanel.SEARCH)
         },
         CommandSpec(Icons.Default.AutoAwesome, "AI", activePanel == EditorPanel.AI) {
             onPanel(EditorPanel.AI)
         },
-        CommandSpec(Icons.Default.Visibility, "閲覧専用", readOnly, onToggleReadOnly),
+        CommandSpec(
+            Icons.Default.Visibility,
+            "閲覧専用",
+            readOnly,
+            gapAfter = true,
+            onClick = onToggleReadOnly,
+        ),
         CommandSpec(
             Icons.Default.Gesture,
             "投げ縄",
@@ -919,10 +926,14 @@ private fun EditorCommandBar(
         CommandSpec(Icons.Default.NearMe, "ポインタ", activePanel == EditorPanel.POINTER) {
             onPanel(EditorPanel.POINTER)
         },
-        CommandSpec(Icons.Default.Mic, "音声", activePanel == EditorPanel.VOICE) {
-            onPanel(EditorPanel.VOICE)
-        },
-        CommandSpec(Icons.Default.NoteAdd, "ページ追加", false, viewModel::addPage),
+        CommandSpec(
+            icon = Icons.Default.Mic,
+            description = "音声",
+            selected = activePanel == EditorPanel.VOICE,
+            onClick = { onPanel(EditorPanel.VOICE) },
+            gapAfter = true,
+        ),
+        CommandSpec(Icons.Default.NoteAdd, "ページ追加", false, onClick = viewModel::addPage),
         CommandSpec(Icons.Default.Share, "共有", false) {
             viewModel.saveActive()
             viewModel.reportStatus("ノートを保存しました")
@@ -943,7 +954,10 @@ private fun EditorCommandBar(
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 items(buttons) { spec ->
-                    CommandButton(spec)
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        CommandButton(spec)
+                        if (spec.gapAfter) Spacer(Modifier.height(14.dp))
+                    }
                 }
             }
         } else {
@@ -953,7 +967,10 @@ private fun EditorCommandBar(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 items(buttons) { spec ->
-                    CommandButton(spec)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CommandButton(spec)
+                        if (spec.gapAfter) Spacer(Modifier.width(14.dp))
+                    }
                 }
             }
         }
@@ -964,6 +981,7 @@ private data class CommandSpec(
     val icon: ImageVector,
     val description: String,
     val selected: Boolean,
+    val gapAfter: Boolean = false,
     val onClick: () -> Unit,
 )
 
@@ -1226,6 +1244,11 @@ private fun ToolChoice(
 @Composable
 private fun LassoPanel(viewModel: MainViewModel) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            "投げ縄はスタイラスで自由な形に囲めます。線を離すと始点と終点を結んで選択範囲を閉じます。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Row(
             Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -1245,7 +1268,7 @@ private fun LassoPanel(viewModel: MainViewModel) {
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Default.Gesture, null)
-            Text("囲んだ後、ペンを離さず静止", Modifier.padding(horizontal = 8.dp).weight(1f))
+            Text("囲ってペンを離した後、囲みの内側をもう一度長押し", Modifier.padding(horizontal = 8.dp).weight(1f))
             Switch(
                 checked = viewModel.circleToLassoEnabled,
                 onCheckedChange = viewModel::setCircleToLassoEnabled,
