@@ -572,7 +572,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
                         selectedDragMoved = true
                         lassoOutline = emptyList()
                     }
-                    onSelectedMove(dx, dy)
+                    if (selectedDragMoved) onSelectedMove(dx, dy)
                     dryView.invalidate()
                     return true
                 }
@@ -720,7 +720,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
                                     selectedDragMoved = true
                                     lassoOutline = emptyList()
                                 }
-                                onSelectedMove(dx, dy)
+                                if (selectedDragMoved) onSelectedMove(dx, dy)
                                 dryView.invalidate()
                             }
                         } else if (!circleHoldCancelled) {

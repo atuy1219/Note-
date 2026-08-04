@@ -122,7 +122,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val childFolders: List<FolderRecord>
         get() = if (showingTrash) {
-            library.folders.filter { it.trashedAt != null }.sortedByDescending { it.trashedAt }
+            library.folders.filter { folder ->
+                folder.trashedAt != null && !hasTrashedAncestor(folder)
+            }.sortedByDescending { it.trashedAt }
         } else {
             val hidden = effectivelyTrashedFolderIds
             library.folders.filter { it.parentId == currentFolderId && it.id !in hidden }
@@ -131,7 +133,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val visibleNotes: List<NoteSummary>
         get() = if (showingTrash) {
-            library.notes.filter { it.trashedAt != null }.sortedByDescending { it.trashedAt }
+            val hidden = effectivelyTrashedFolderIds
+            library.notes.filter { note ->
+                note.trashedAt != null && note.folderId !in hidden
+            }.sortedByDescending { it.trashedAt }
         } else {
             val hidden = effectivelyTrashedFolderIds
             library.notes.filter { note ->
@@ -140,8 +145,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
 
     val trashItemCount: Int
-        get() = library.notes.count { it.trashedAt != null } +
-            library.folders.count { it.trashedAt != null }
+        get() {
+            val hidden = effectivelyTrashedFolderIds
+            val noteCount = library.notes.count { note ->
+                note.trashedAt != null && note.folderId !in hidden
+            }
+            val folderCount = library.folders.count { folder ->
+                folder.trashedAt != null && !hasTrashedAncestor(folder)
+            }
+            return noteCount + folderCount
+        }
+
+    private fun hasTrashedAncestor(folder: FolderRecord): Boolean {
+        val byId = library.folders.associateBy { it.id }
+        val visited = mutableSetOf<String>()
+        var parentId = folder.parentId
+        while (parentId != null) {
+            if (!visited.add(parentId)) return true
+            val parent = byId[parentId] ?: return false
+            if (parent.trashedAt != null) return true
+            parentId = parent.parentId
+        }
+        return false
+    }
 
     fun clearStatus() { statusMessage = null }
     fun reportStatus(message: String) { statusMessage = message }
