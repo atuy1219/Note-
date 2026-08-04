@@ -77,7 +77,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
-import androidx.compose.material3.ScrollableTabRow
+import androidx.compose.material3.PrimaryScrollableTabRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -442,7 +442,7 @@ private fun EditorScreen(viewModel: MainViewModel, onImportImage: () -> Unit, sn
                         }
                     },
                 )
-                ScrollableTabRow(selectedTabIndex = selectedTab, edgePadding = 8.dp) {
+                PrimaryScrollableTabRow(selectedTabIndex = selectedTab, edgePadding = 8.dp) {
                     viewModel.openTabs.forEach { tab ->
                         Tab(
                             selected = tab.id == active.id,
