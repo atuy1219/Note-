@@ -147,7 +147,7 @@ class NoteRepository(private val context: Context) {
     suspend fun restoreNote(noteId: String, current: LibraryIndex): LibraryIndex {
         val summary = current.notes.firstOrNull { it.id == noteId } ?: return current
         val restoredFolderId = summary.folderId?.takeIf { folderId ->
-            current.folders.any { it.id == folderId && it.trashedAt == null }
+            isFolderActive(folderId, current.folders)
         }
         return updateNoteMetadata(noteId, current) { document ->
             document.copy(
@@ -206,7 +206,7 @@ class NoteRepository(private val context: Context) {
             ioMutex.withLock {
                 val target = current.folders.firstOrNull { it.id == folderId } ?: return@withLock current
                 val restoredParentId = target.parentId?.takeIf { parentId ->
-                    current.folders.any { it.id == parentId && it.trashedAt == null }
+                    isFolderActive(parentId, current.folders)
                 }
                 current.copy(
                     folders = current.folders.map { folder ->
@@ -556,6 +556,19 @@ class NoteRepository(private val context: Context) {
             temp.delete()
         }
         return updated
+    }
+
+    private fun isFolderActive(folderId: String, folders: List<FolderRecord>): Boolean {
+        val byId = folders.associateBy { it.id }
+        val visited = mutableSetOf<String>()
+        var currentId: String? = folderId
+        while (currentId != null) {
+            if (!visited.add(currentId)) return false
+            val folder = byId[currentId] ?: return false
+            if (folder.trashedAt != null) return false
+            currentId = folder.parentId
+        }
+        return true
     }
 
     private fun descendantFolderIds(rootId: String, folders: List<FolderRecord>): Set<String> {

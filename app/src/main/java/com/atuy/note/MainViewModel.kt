@@ -337,8 +337,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun trashLibraryFolder(folderId: String) {
         viewModelScope.launch {
             runBusy {
+                val folderIds = descendantFolderIds(folderId) + folderId
+                val noteIds = library.notes.filter { it.folderId in folderIds }.map { it.id }.toSet()
+                openTabs.filter { it.id in noteIds && it.dirty }.forEach { saveNow(it) }
+                noteIds.forEach { saveJobs.remove(it)?.cancel() }
                 library = repository.trashFolder(folderId, library)
-                if (currentFolderId == folderId) currentFolderId = null
+                openTabs.removeAll { it.id in noteIds }
+                if (activeNoteId in noteIds) activeNoteId = null
+                if (currentFolderId in folderIds) currentFolderId = null
             }
         }
     }

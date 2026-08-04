@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
@@ -800,7 +801,6 @@ private fun HomeGrid(
             val target = LibraryTarget.Folder(folder)
             Card(
                 onClick = { if (!showingTrash) onFolder(folder) },
-                enabled = !showingTrash,
                 modifier = Modifier.fillMaxWidth().height(210.dp),
             ) {
                 Box(Modifier.fillMaxSize()) {
@@ -842,7 +842,6 @@ private fun HomeGrid(
             }
             Card(
                 onClick = { if (!showingTrash) onNote(note) },
-                enabled = !showingTrash,
                 modifier = Modifier.fillMaxWidth().height(250.dp),
             ) {
                 Box(Modifier.fillMaxSize()) {
@@ -1261,10 +1260,10 @@ private fun EditorCommandBar(
     }
     val pages = CommandSpec(Icons.Default.Menu, "ページ一覧", showPages, onTogglePages)
 
-    val detailBlock = listOf(details, share, addPage)
+    val detailBlock = listOf(addPage, share, details)
     val toolsBeforeLasso = listOf(pen, eraser, text, sticker)
     val toolsAfterLasso = listOf(image, shape, sticky, pointer, voice)
-    val pageBlock = listOf(readOnlyCommand, ai, search, pages)
+    val pageBlock = listOf(pages, search, ai, readOnlyCommand)
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -1272,22 +1271,29 @@ private fun EditorCommandBar(
     ) {
         BoxWithConstraints {
             if (vertical) {
-                if (maxHeight >= 760.dp) {
-                    Column(
-                        Modifier.width(64.dp).fillMaxHeight().padding(vertical = 6.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        CommandColumn(detailBlock)
-                        Spacer(Modifier.weight(1f))
-                        CommandColumn(toolsBeforeLasso)
-                        CommandButton(lasso)
-                        CommandColumn(toolsAfterLasso)
-                        Spacer(Modifier.weight(1f))
-                        CommandColumn(pageBlock)
+                if (maxHeight >= 1040.dp) {
+                    val beforeHeight = COMMAND_EXTENT * toolsBeforeLasso.size.toFloat()
+                    val afterHeight = COMMAND_EXTENT * toolsAfterLasso.size.toFloat()
+                    Box(Modifier.width(COMMAND_EXTENT).fillMaxHeight().padding(vertical = 6.dp)) {
+                        CommandColumn(detailBlock, Modifier.align(Alignment.TopCenter))
+                        CommandColumn(pageBlock, Modifier.align(Alignment.BottomCenter))
+                        CommandColumn(
+                            toolsBeforeLasso,
+                            Modifier.align(Alignment.Center).offset(
+                                y = -(COMMAND_EXTENT / 2f + beforeHeight / 2f),
+                            ),
+                        )
+                        CommandButton(lasso, Modifier.align(Alignment.Center))
+                        CommandColumn(
+                            toolsAfterLasso,
+                            Modifier.align(Alignment.Center).offset(
+                                y = COMMAND_EXTENT / 2f + afterHeight / 2f,
+                            ),
+                        )
                     }
                 } else {
                     Column(
-                        Modifier.width(64.dp).fillMaxHeight().verticalScroll(rememberScrollState())
+                        Modifier.width(COMMAND_EXTENT).fillMaxHeight().verticalScroll(rememberScrollState())
                             .padding(vertical = 6.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
@@ -1301,23 +1307,30 @@ private fun EditorCommandBar(
                     }
                 }
             } else {
-                if (maxWidth >= 1120.dp) {
-                    Row(
-                        Modifier.fillMaxWidth().height(62.dp).padding(horizontal = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        CommandRow(detailBlock)
-                        Spacer(Modifier.weight(1f))
-                        CommandRow(toolsBeforeLasso)
-                        CommandButton(lasso)
-                        CommandRow(toolsAfterLasso)
-                        Spacer(Modifier.weight(1f))
-                        CommandRow(pageBlock)
+                if (maxWidth >= 1040.dp) {
+                    val beforeWidth = COMMAND_EXTENT * toolsBeforeLasso.size.toFloat()
+                    val afterWidth = COMMAND_EXTENT * toolsAfterLasso.size.toFloat()
+                    Box(Modifier.fillMaxWidth().height(COMMAND_EXTENT).padding(horizontal = 8.dp)) {
+                        CommandRow(detailBlock, Modifier.align(Alignment.CenterStart))
+                        CommandRow(pageBlock, Modifier.align(Alignment.CenterEnd))
+                        CommandRow(
+                            toolsBeforeLasso,
+                            Modifier.align(Alignment.Center).offset(
+                                x = -(COMMAND_EXTENT / 2f + beforeWidth / 2f),
+                            ),
+                        )
+                        CommandButton(lasso, Modifier.align(Alignment.Center))
+                        CommandRow(
+                            toolsAfterLasso,
+                            Modifier.align(Alignment.Center).offset(
+                                x = COMMAND_EXTENT / 2f + afterWidth / 2f,
+                            ),
+                        )
                     }
                 } else {
                     Row(
-                        Modifier.fillMaxWidth().height(62.dp).horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 8.dp),
+                        Modifier.fillMaxWidth().height(COMMAND_EXTENT)
+                            .horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         CommandRow(detailBlock)
@@ -1341,20 +1354,35 @@ private data class CommandSpec(
     val onClick: () -> Unit,
 )
 
+private val COMMAND_EXTENT = 52.dp
+
 @Composable
-private fun CommandRow(commands: List<CommandSpec>) {
-    commands.forEach { CommandButton(it) }
+private fun CommandRow(
+    commands: List<CommandSpec>,
+    modifier: Modifier = Modifier,
+) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        commands.forEach { CommandButton(it) }
+    }
 }
 
 @Composable
-private fun CommandColumn(commands: List<CommandSpec>) {
-    commands.forEach { CommandButton(it) }
+private fun CommandColumn(
+    commands: List<CommandSpec>,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        commands.forEach { CommandButton(it) }
+    }
 }
 
 @Composable
-private fun CommandButton(spec: CommandSpec) {
+private fun CommandButton(
+    spec: CommandSpec,
+    modifier: Modifier = Modifier,
+) {
     Surface(
-        modifier = Modifier.padding(2.dp),
+        modifier = modifier.size(COMMAND_EXTENT).padding(2.dp),
         shape = CircleShape,
         color = if (spec.selected) {
             MaterialTheme.colorScheme.primaryContainer
