@@ -5,8 +5,7 @@ on:
     branches:
       - main
     types:
-      - opened
-      - synchronize
+      - reopened
 
 permissions:
   contents: write
@@ -23,7 +22,7 @@ jobs:
           ref: agent/fix-nightly-validation-warnings
           fetch-depth: 0
 
-      - name: Apply fixes
+      - name: Apply warning fixes
         run: python .github/fix_nightly_and_warnings.py
 
       - name: Set up JDK 17
@@ -53,17 +52,14 @@ jobs:
             exit 1
           fi
 
-      - name: Persist fixes
+      - name: Persist Kotlin warning fixes
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .github/workflows/nightly.yml \
-            app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt \
+          git add app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt \
             app/src/main/java/com/atuy/note/ui/NoteApp.kt
-          git rm .github/fix_nightly_and_warnings.py
-          git rm .github/workflows/apply-nightly-warning-fix.yml
-          git diff --check
-          git commit -m 'Fix nightly validation and Compose warnings'
+          git diff --cached --check
+          git commit -m 'Remove Compose deprecation warnings'
           git push origin HEAD:agent/fix-nightly-validation-warnings
