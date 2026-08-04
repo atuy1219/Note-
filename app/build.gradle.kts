@@ -4,6 +4,17 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+val nightlySigningStoreFile = System.getenv("NOTE_SIGNING_STORE_FILE")
+val nightlySigningStorePassword = System.getenv("NOTE_SIGNING_STORE_PASSWORD")
+val nightlySigningKeyAlias = System.getenv("NOTE_SIGNING_KEY_ALIAS")
+val nightlySigningKeyPassword = System.getenv("NOTE_SIGNING_KEY_PASSWORD")
+val hasNightlySigning = listOf(
+    nightlySigningStoreFile,
+    nightlySigningStorePassword,
+    nightlySigningKeyAlias,
+    nightlySigningKeyPassword,
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "com.atuy.note"
     compileSdk = 37
@@ -19,14 +30,27 @@ android {
         vectorDrawables.useSupportLibrary = true
     }
 
+    val nightlySigningConfig = if (hasNightlySigning) {
+        signingConfigs.create("nightly") {
+            storeFile = file(requireNotNull(nightlySigningStoreFile))
+            storePassword = nightlySigningStorePassword
+            keyAlias = nightlySigningKeyAlias
+            keyPassword = nightlySigningKeyPassword
+        }
+    } else {
+        null
+    }
+
     buildTypes {
         debug {
             versionNameSuffix = "-debug"
+            nightlySigningConfig?.let { signingConfig = it }
         }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            nightlySigningConfig?.let { signingConfig = it }
         }
     }
 
