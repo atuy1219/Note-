@@ -1,0 +1,112 @@
+name: Fix toolbar blocks and eraser icon
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/fix-toolbar-blocks-eraser.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-verify:
+    if: github.head_ref == 'agent/fix-toolbar-block-order-eraser-icon'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Apply toolbar fixes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt')
+          text = path.read_text()
+
+          old_import = 'import androidx.compose.material.icons.filled.Image\n'
+          new_import = old_import + 'import androidx.compose.material.icons.filled.InkEraser\n'
+          if 'import androidx.compose.material.icons.filled.InkEraser\n' not in text:
+              if old_import not in text:
+                  raise SystemExit('Image icon import anchor not found')
+              text = text.replace(old_import, new_import, 1)
+
+          old_eraser = '''    val eraser = CommandSpec(
+              Icons.Default.DeleteOutline,
+              "消しゴム",
+          '''
+          new_eraser = '''    val eraser = CommandSpec(
+              Icons.Default.InkEraser,
+              "消しゴム",
+          '''
+          if old_eraser not in text:
+              raise SystemExit('Eraser CommandSpec anchor not found')
+          text = text.replace(old_eraser, new_eraser, 1)
+
+          replacements = {
+              'CommandColumn(detailBlock, Modifier.align(Alignment.TopCenter))':
+                  'CommandColumn(pageBlock, Modifier.align(Alignment.TopCenter))',
+              'CommandColumn(pageBlock, Modifier.align(Alignment.BottomCenter))':
+                  'CommandColumn(detailBlock, Modifier.align(Alignment.BottomCenter))',
+              'CommandRow(detailBlock, Modifier.align(Alignment.CenterStart))':
+                  'CommandRow(pageBlock, Modifier.align(Alignment.CenterStart))',
+              'CommandRow(pageBlock, Modifier.align(Alignment.CenterEnd))':
+                  'CommandRow(detailBlock, Modifier.align(Alignment.CenterEnd))',
+              '''                        CommandColumn(detailBlock)
+                          Spacer(Modifier.height(14.dp))
+                          CommandColumn(toolsBeforeLasso)''':
+                  '''                        CommandColumn(pageBlock)
+                          Spacer(Modifier.height(14.dp))
+                          CommandColumn(toolsBeforeLasso)''',
+              '''                        CommandColumn(toolsAfterLasso)
+                          Spacer(Modifier.height(14.dp))
+                          CommandColumn(pageBlock)''':
+                  '''                        CommandColumn(toolsAfterLasso)
+                          Spacer(Modifier.height(14.dp))
+                          CommandColumn(detailBlock)''',
+              '''                        CommandRow(detailBlock)
+                          Spacer(Modifier.width(14.dp))
+                          CommandRow(toolsBeforeLasso)''':
+                  '''                        CommandRow(pageBlock)
+                          Spacer(Modifier.width(14.dp))
+                          CommandRow(toolsBeforeLasso)''',
+              '''                        CommandRow(toolsAfterLasso)
+                          Spacer(Modifier.width(14.dp))
+                          CommandRow(pageBlock)''':
+                  '''                        CommandRow(toolsAfterLasso)
+                          Spacer(Modifier.width(14.dp))
+                          CommandRow(detailBlock)''',
+          }
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f'Toolbar layout anchor not found: {old[:70]!r}')
+              text = text.replace(old, new, 1)
+
+          path.write_text(text)
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK 37
+        run: yes | sdkmanager 'platforms;android-37' 'build-tools;36.0.0'
+
+      - uses: gradle/actions/setup-gradle@v5
+
+      - name: Build and test
+        run: ./gradlew :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest --stacktrace
+
+      - name: Persist fix
+        run: |
+          rm -f .github/workflows/fix-toolbar-blocks-eraser.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt .github/workflows/fix-toolbar-blocks-eraser.yml
+          git commit -m 'Swap toolbar edge blocks and use eraser icon'
+          git push origin HEAD:${{ github.head_ref }}
