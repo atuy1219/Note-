@@ -848,7 +848,7 @@ private fun EditorCommandBar(
     onPanel: (EditorPanel) -> Unit,
 ) {
     val buttons = listOf(
-        CommandSpec(Icons.Default.Menu, "ページ一覧", showPages, onTogglePages),
+        CommandSpec(Icons.Default.Menu, "ページ一覧", showPages, onClick = onTogglePages),
         CommandSpec(Icons.Default.Search, "検索", activePanel == EditorPanel.SEARCH) {
             onPanel(EditorPanel.SEARCH)
         },
@@ -859,8 +859,8 @@ private fun EditorCommandBar(
             Icons.Default.Visibility,
             "閲覧専用",
             readOnly,
-            onToggleReadOnly,
             gapAfter = true,
+            onClick = onToggleReadOnly,
         ),
         CommandSpec(
             Icons.Default.Gesture,
@@ -933,7 +933,7 @@ private fun EditorCommandBar(
             onClick = { onPanel(EditorPanel.VOICE) },
             gapAfter = true,
         ),
-        CommandSpec(Icons.Default.NoteAdd, "ページ追加", false, viewModel::addPage),
+        CommandSpec(Icons.Default.NoteAdd, "ページ追加", false, onClick = viewModel::addPage),
         CommandSpec(Icons.Default.Share, "共有", false) {
             viewModel.saveActive()
             viewModel.reportStatus("ノートを保存しました")
@@ -981,8 +981,8 @@ private data class CommandSpec(
     val icon: ImageVector,
     val description: String,
     val selected: Boolean,
-    val onClick: () -> Unit,
     val gapAfter: Boolean = false,
+    val onClick: () -> Unit,
 )
 
 @Composable

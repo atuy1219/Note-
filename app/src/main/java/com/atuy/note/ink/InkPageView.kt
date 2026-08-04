@@ -692,7 +692,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
             val pointerId = circleHoldPointerId
             when (event.actionMasked) {
                 MotionEvent.ACTION_MOVE -> {
-                    val index = pointerId?.let(event::findPointerIndex) ?: -1
+                    val index = pointerId?.let { event.findPointerIndex(it) } ?: -1
                     if (index >= 0 && !circleHoldCancelled) {
                         val point = mapViewToWorld(event.getX(index), event.getY(index))
                         val distance = hypot(point.x - circleHoldStartX, point.y - circleHoldStartY)
@@ -849,7 +849,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
             canvas.restore()
 
             if (toolProvider() == ToolMode.LASSO) {
-                if (lassoOutline.size >= 3 && current.selectedStrokeIds.isNotEmpty()) {
+                if (lassoOutline.size >= 3) {
                     val selectionPath = Path().apply {
                         moveTo(lassoOutline.first().x, lassoOutline.first().y)
                         lassoOutline.drop(1).forEach { lineTo(it.x, it.y) }
