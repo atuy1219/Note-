@@ -84,6 +84,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private var brushProvider: () -> BrushSpec = { BrushSpec() }
     private var navigationGestureProvider: () -> NavigationGestureMode = { NavigationGestureMode.ONE_FINGER }
     private var circleToLassoEnabledProvider: () -> Boolean = { false }
+    private var readOnlyProvider: () -> Boolean = { false }
     private var onNavigationPan: (Float, Float) -> Unit = { _, _ -> }
     private var onStrokeAdded: (RuntimeStroke) -> Unit = {}
     private var onEraseStart: () -> Unit = {}
@@ -170,6 +171,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         brushProvider: () -> BrushSpec,
         navigationGestureProvider: () -> NavigationGestureMode,
         circleToLassoEnabledProvider: () -> Boolean,
+        readOnlyProvider: () -> Boolean = { false },
         onNavigationPan: (Float, Float) -> Unit,
         onStrokeAdded: (RuntimeStroke) -> Unit,
         onEraseStart: () -> Unit,
@@ -199,6 +201,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         this.brushProvider = brushProvider
         this.navigationGestureProvider = navigationGestureProvider
         this.circleToLassoEnabledProvider = circleToLassoEnabledProvider
+        this.readOnlyProvider = readOnlyProvider
         this.onNavigationPan = onNavigationPan
         this.onStrokeAdded = onStrokeAdded
         this.onEraseStart = onEraseStart
@@ -262,6 +265,15 @@ class InkPageView(context: Context) : FrameLayout(context) {
         val actionToolType = event.getToolType(routedIndex)
         val actionIsStylus = actionToolType == MotionEvent.TOOL_TYPE_STYLUS ||
             actionToolType == MotionEvent.TOOL_TYPE_ERASER
+
+        if (readOnlyProvider() && actionIsStylus) {
+            if (event.actionMasked == MotionEvent.ACTION_DOWN ||
+                event.actionMasked == MotionEvent.ACTION_POINTER_DOWN
+            ) {
+                onActivated()
+            }
+            return true
+        }
 
         if (!actionIsStylus) {
             if (stylusIndex != null) return true
