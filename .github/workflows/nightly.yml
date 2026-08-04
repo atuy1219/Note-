@@ -91,22 +91,35 @@ jobs:
           test -x "$APKSIGNER"
 
           expected_digest=''
+          apk_count=0
           while IFS= read -r apk; do
+            ((apk_count += 1))
             output="dist/$(basename "$apk")"
+            echo "Verifying $apk"
             cp "$apk" "$output"
-            "$APKSIGNER" verify "$output"
 
-            certificate_digest="$(
-              "$APKSIGNER" verify --print-certs "$output" |
-                sed -n 's/^Signer #1 certificate SHA-256 digest: //p' |
-                head -n 1
-            )"
-            test -n "$certificate_digest"
+            certificate_info="$("$APKSIGNER" verify --print-certs "$output")"
+            printf '%s\n' "$certificate_info"
+
+            certificate_digest=''
+            while IFS= read -r certificate_line; do
+              if [[ "$certificate_line" =~ certificate[[:space:]]SHA-256[[:space:]]digest:[[:space:]]*([[:xdigit:]]+) ]]; then
+                certificate_digest="${BASH_REMATCH[1],,}"
+                break
+              fi
+            done <<< "$certificate_info"
+
+            if [[ -z "$certificate_digest" ]]; then
+              echo "Unable to extract the signing certificate SHA-256 digest from $output" >&2
+              exit 1
+            fi
 
             if [[ -z "$expected_digest" ]]; then
               expected_digest="$certificate_digest"
             elif [[ "$certificate_digest" != "$expected_digest" ]]; then
               echo "APK signing certificate mismatch: $output" >&2
+              echo "Expected: $expected_digest" >&2
+              echo "Actual:   $certificate_digest" >&2
               exit 1
             fi
           done < <(
@@ -114,7 +127,11 @@ jobs:
               -name '*.apk' ! -name '*-unsigned.apk' -type f | sort
           )
 
-          test -n "$(find dist -name '*.apk' -print -quit)"
+          if ((apk_count == 0)); then
+            echo 'No signed APKs were produced.' >&2
+            exit 1
+          fi
+
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
 
       - name: Remove previous downloadable APK artifacts
