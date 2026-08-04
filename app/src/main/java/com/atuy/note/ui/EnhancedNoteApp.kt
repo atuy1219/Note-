@@ -45,12 +45,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.automirrored.filled.NoteAdd
+import androidx.compose.material.icons.automirrored.filled.StickyNote2
 import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.ArrowDownward
-import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.BorderColor
@@ -78,13 +80,11 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.NearMe
-import androidx.compose.material.icons.filled.NoteAdd
 import androidx.compose.material.icons.filled.PictureAsPdf
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material.icons.filled.StickyNote2
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
@@ -920,7 +920,7 @@ private fun EditorCommandBar(
         CommandSpec(Icons.Default.Category, "シェイプ", activePanel == EditorPanel.SHAPE) {
             onPanel(EditorPanel.SHAPE)
         },
-        CommandSpec(Icons.Default.StickyNote2, "付箋", activePanel == EditorPanel.STICKY) {
+        CommandSpec(Icons.AutoMirrored.Filled.StickyNote2, "付箋", activePanel == EditorPanel.STICKY) {
             onPanel(EditorPanel.STICKY)
         },
         CommandSpec(Icons.Default.NearMe, "ポインタ", activePanel == EditorPanel.POINTER) {
@@ -933,7 +933,7 @@ private fun EditorCommandBar(
             onClick = { onPanel(EditorPanel.VOICE) },
             gapAfter = true,
         ),
-        CommandSpec(Icons.Default.NoteAdd, "ページ追加", false, onClick = viewModel::addPage),
+        CommandSpec(Icons.AutoMirrored.Filled.NoteAdd, "ページ追加", false, onClick = viewModel::addPage),
         CommandSpec(Icons.Default.Share, "共有", false) {
             viewModel.saveActive()
             viewModel.reportStatus("ノートを保存しました")
@@ -1377,7 +1377,7 @@ private fun DockChoices(uiPreferences: UiPreferencesState) {
         DockChoice(Icons.Default.ArrowUpward, "上", ToolbarDock.TOP, uiPreferences)
         DockChoice(Icons.Default.ArrowDownward, "下", ToolbarDock.BOTTOM, uiPreferences)
         DockChoice(Icons.AutoMirrored.Filled.ArrowBack, "左", ToolbarDock.LEFT, uiPreferences)
-        DockChoice(Icons.Default.ArrowForward, "右", ToolbarDock.RIGHT, uiPreferences)
+        DockChoice(Icons.AutoMirrored.Filled.ArrowForward, "右", ToolbarDock.RIGHT, uiPreferences)
     }
 }
 
