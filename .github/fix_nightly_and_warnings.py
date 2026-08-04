@@ -9,18 +9,6 @@ def replace_once(path: Path, old: str, new: str) -> None:
     path.write_text(text.replace(old, new, 1))
 
 
-nightly = Path(".github/workflows/nightly.yml")
-replace_once(
-    nightly,
-    "      NOTE_SIGNING_STORE_FILE: ${{ runner.temp }}/note-nightly.keystore\n",
-    "",
-)
-replace_once(
-    nightly,
-    "          set -euo pipefail\n\n          if [[ -z \"$SIGNING_KEY_STORE_BASE64\"",
-    "          set -euo pipefail\n\n          export NOTE_SIGNING_STORE_FILE=\"$RUNNER_TEMP/note-nightly.keystore\"\n          echo \"NOTE_SIGNING_STORE_FILE=$NOTE_SIGNING_STORE_FILE\" >> \"$GITHUB_ENV\"\n\n          if [[ -z \"$SIGNING_KEY_STORE_BASE64\"",
-)
-
 enhanced = Path("app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt")
 replace_once(
     enhanced,
