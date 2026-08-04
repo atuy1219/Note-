@@ -115,7 +115,7 @@ jobs:
           test -n "$(find dist -name '*.apk' -print -quit)"
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
 
-      - name: Remove previous nightly artifacts
+      - name: Remove previous downloadable APK artifacts
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -126,7 +126,7 @@ jobs:
             gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"
           done < <(
             gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
-              --jq '.artifacts[] | select(.name == "note-nightly-latest" or (.name | startswith("note-nightly-"))) | .id'
+              --jq '.artifacts[] | select(.name == "note-ci-apks" or .name == "note-nightly-latest" or (.name | startswith("note-nightly-"))) | .id'
           )
 
       - name: Upload latest nightly artifact
