@@ -34,56 +34,23 @@ jobs:
                   raise SystemExit('Image icon import anchor not found')
               text = text.replace(old_import, new_import, 1)
 
-          old_eraser = '''    val eraser = CommandSpec(
-              Icons.Default.DeleteOutline,
-              "消しゴム",
-          '''
-          new_eraser = '''    val eraser = CommandSpec(
-              Icons.Default.InkEraser,
-              "消しゴム",
-          '''
+          old_eraser = 'Icons.Default.DeleteOutline,\n        "消しゴム",'
+          new_eraser = 'Icons.Default.InkEraser,\n        "消しゴム",'
           if old_eraser not in text:
               raise SystemExit('Eraser CommandSpec anchor not found')
           text = text.replace(old_eraser, new_eraser, 1)
 
-          replacements = {
-              'CommandColumn(detailBlock, Modifier.align(Alignment.TopCenter))':
-                  'CommandColumn(pageBlock, Modifier.align(Alignment.TopCenter))',
-              'CommandColumn(pageBlock, Modifier.align(Alignment.BottomCenter))':
-                  'CommandColumn(detailBlock, Modifier.align(Alignment.BottomCenter))',
-              'CommandRow(detailBlock, Modifier.align(Alignment.CenterStart))':
-                  'CommandRow(pageBlock, Modifier.align(Alignment.CenterStart))',
-              'CommandRow(pageBlock, Modifier.align(Alignment.CenterEnd))':
-                  'CommandRow(detailBlock, Modifier.align(Alignment.CenterEnd))',
-              '''                        CommandColumn(detailBlock)
-                          Spacer(Modifier.height(14.dp))
-                          CommandColumn(toolsBeforeLasso)''':
-                  '''                        CommandColumn(pageBlock)
-                          Spacer(Modifier.height(14.dp))
-                          CommandColumn(toolsBeforeLasso)''',
-              '''                        CommandColumn(toolsAfterLasso)
-                          Spacer(Modifier.height(14.dp))
-                          CommandColumn(pageBlock)''':
-                  '''                        CommandColumn(toolsAfterLasso)
-                          Spacer(Modifier.height(14.dp))
-                          CommandColumn(detailBlock)''',
-              '''                        CommandRow(detailBlock)
-                          Spacer(Modifier.width(14.dp))
-                          CommandRow(toolsBeforeLasso)''':
-                  '''                        CommandRow(pageBlock)
-                          Spacer(Modifier.width(14.dp))
-                          CommandRow(toolsBeforeLasso)''',
-              '''                        CommandRow(toolsAfterLasso)
-                          Spacer(Modifier.width(14.dp))
-                          CommandRow(pageBlock)''':
-                  '''                        CommandRow(toolsAfterLasso)
-                          Spacer(Modifier.width(14.dp))
-                          CommandRow(detailBlock)''',
-          }
-          for old, new in replacements.items():
-              if old not in text:
-                  raise SystemExit(f'Toolbar layout anchor not found: {old[:70]!r}')
-              text = text.replace(old, new, 1)
+          swaps = [
+              ('CommandColumn(detailBlock', 'CommandColumn(pageBlock'),
+              ('CommandRow(detailBlock', 'CommandRow(pageBlock'),
+          ]
+          for detail_call, page_call in swaps:
+              if detail_call not in text or page_call not in text:
+                  raise SystemExit(f'Toolbar block anchor not found: {detail_call} / {page_call}')
+              sentinel = f'__SWAP_{detail_call.replace("(", "_").replace(" ", "_")}__'
+              text = text.replace(detail_call, sentinel)
+              text = text.replace(page_call, detail_call)
+              text = text.replace(sentinel, page_call)
 
           path.write_text(text)
 
