@@ -28,15 +28,15 @@ jobs:
           path = Path('app/src/main/java/com/atuy/note/ui/EnhancedNoteApp.kt')
           text = path.read_text()
 
-          old_import = 'import androidx.compose.material.icons.filled.Image\n'
-          new_import = old_import + 'import androidx.compose.material.icons.filled.InkEraser\n'
-          if 'import androidx.compose.material.icons.filled.InkEraser\n' not in text:
+          old_import = 'import androidx.compose.material.icons.filled.AutoAwesome\n'
+          new_import = old_import + 'import androidx.compose.material.icons.filled.AutoFixNormal\n'
+          if 'import androidx.compose.material.icons.filled.AutoFixNormal\n' not in text:
               if old_import not in text:
-                  raise SystemExit('Image icon import anchor not found')
+                  raise SystemExit('AutoAwesome icon import anchor not found')
               text = text.replace(old_import, new_import, 1)
 
           old_eraser = 'Icons.Default.DeleteOutline,\n        "消しゴム",'
-          new_eraser = 'Icons.Default.InkEraser,\n        "消しゴム",'
+          new_eraser = 'Icons.Default.AutoFixNormal,\n        "消しゴム",'
           if old_eraser not in text:
               raise SystemExit('Eraser CommandSpec anchor not found')
           text = text.replace(old_eraser, new_eraser, 1)
