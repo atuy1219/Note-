@@ -84,6 +84,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private var circleHoldStartY = 0f
     private var circleHoldGestureActive = false
     private var circleHoldCancelled = false
+    private var circleHoldConverted = false
     private var lassoOutline: List<PointF> = emptyList()
     private val lassoBrush = Brush.createWithColorIntArgb(
         StockBrushes.dashedLine(),
@@ -106,6 +107,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private var onErase: (Float, Float, Float) -> Unit = { _, _, _ -> }
     private var onEraseEnd: () -> Unit = {}
     private var onLassoFinished: (Stroke) -> Unit = {}
+    private var onCircleCandidateReady: () -> Unit = {}
     private var onCircleHoldLasso: (String, Stroke) -> Unit = { _, _ -> }
     private var onSelectedTransformStart: () -> Boolean = { false }
     private var onSelectedMove: (Float, Float) -> Unit = { _, _ -> }
@@ -123,6 +125,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private var imageDragOffsetY = 0f
     private var eraserGestureActive = false
     private var selectedDragActive = false
+    private var selectedDragMoved = false
     private var selectedDragStartX = 0f
     private var selectedDragStartY = 0f
 
@@ -154,13 +157,15 @@ class InkPageView(context: Context) : FrameLayout(context) {
                         val spec = strokeBrushSpecs.remove(id) ?: brushProvider()
                         val runtime = stroke.toRuntimeStroke(spec)
                         onStrokeAdded(runtime)
-                        circleLassoCandidate = if (
+                        val candidate = if (
                             circleToLassoEnabledProvider() && looksLikeClosedLoop(runtime)
                         ) {
                             CircleLassoCandidate(runtime.stored.id, stroke, runtime.samples)
                         } else {
                             null
                         }
+                        circleLassoCandidate = candidate
+                        if (candidate != null) onCircleCandidateReady()
                     }
                 }
                 val finishedIds = strokes.keys.toSet()
@@ -193,6 +198,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         onErase: (Float, Float, Float) -> Unit,
         onEraseEnd: () -> Unit,
         onLassoFinished: (Stroke) -> Unit,
+        onCircleCandidateReady: () -> Unit = {},
         onCircleHoldLasso: (String, Stroke) -> Unit,
         onSelectedTransformStart: () -> Boolean,
         onSelectedMove: (Float, Float) -> Unit,
@@ -225,6 +231,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         this.onErase = onErase
         this.onEraseEnd = onEraseEnd
         this.onLassoFinished = onLassoFinished
+        this.onCircleCandidateReady = onCircleCandidateReady
         this.onCircleHoldLasso = onCircleHoldLasso
         this.onSelectedTransformStart = onSelectedTransformStart
         this.onSelectedMove = onSelectedMove
@@ -550,8 +557,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 if (currentPage.isPointInsideStrokeSelection(point.x, point.y) && onSelectedTransformStart()) {
-                    lassoOutline = emptyList()
                     selectedDragActive = true
+                    selectedDragMoved = false
                     selectedDragStartX = point.x
                     selectedDragStartY = point.y
                     return true
@@ -559,7 +566,13 @@ class InkPageView(context: Context) : FrameLayout(context) {
             }
             MotionEvent.ACTION_MOVE -> {
                 if (selectedDragActive) {
-                    onSelectedMove(point.x - selectedDragStartX, point.y - selectedDragStartY)
+                    val dx = point.x - selectedDragStartX
+                    val dy = point.y - selectedDragStartY
+                    if (!selectedDragMoved && hypot(dx, dy) > SELECTED_DRAG_SLOP / viewport.zoom) {
+                        selectedDragMoved = true
+                        lassoOutline = emptyList()
+                    }
+                    if (selectedDragMoved) onSelectedMove(dx, dy)
                     dryView.invalidate()
                     return true
                 }
@@ -567,6 +580,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
                 if (selectedDragActive) {
                     selectedDragActive = false
+                    selectedDragMoved = false
                     onSelectedTransformEnd()
                     releaseParentIntercept()
                     dryView.invalidate()
@@ -576,6 +590,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
             MotionEvent.ACTION_CANCEL -> {
                 if (selectedDragActive) {
                     selectedDragActive = false
+                    selectedDragMoved = false
                     onSelectedTransformCancel()
                     releaseParentIntercept()
                     dryView.invalidate()
@@ -693,19 +708,46 @@ class InkPageView(context: Context) : FrameLayout(context) {
             when (event.actionMasked) {
                 MotionEvent.ACTION_MOVE -> {
                     val index = pointerId?.let { event.findPointerIndex(it) } ?: -1
-                    if (index >= 0 && !circleHoldCancelled) {
+                    if (index >= 0) {
                         val point = mapViewToWorld(event.getX(index), event.getY(index))
-                        val distance = hypot(point.x - circleHoldStartX, point.y - circleHoldStartY)
-                        if (distance > CIRCLE_HOLD_SLOP / viewport.zoom) {
-                            circleHoldCancelled = true
-                            circleHoldRunnable?.let(::removeCallbacks)
-                            circleHoldRunnable = null
+                        if (circleHoldConverted) {
+                            if (selectedDragActive) {
+                                val dx = point.x - selectedDragStartX
+                                val dy = point.y - selectedDragStartY
+                                if (!selectedDragMoved &&
+                                    hypot(dx, dy) > SELECTED_DRAG_SLOP / viewport.zoom
+                                ) {
+                                    selectedDragMoved = true
+                                    lassoOutline = emptyList()
+                                }
+                                if (selectedDragMoved) onSelectedMove(dx, dy)
+                                dryView.invalidate()
+                            }
+                        } else if (!circleHoldCancelled) {
+                            val distance = hypot(point.x - circleHoldStartX, point.y - circleHoldStartY)
+                            if (distance > CIRCLE_HOLD_SLOP / viewport.zoom) {
+                                circleHoldCancelled = true
+                                circleHoldRunnable?.let(::removeCallbacks)
+                                circleHoldRunnable = null
+                            }
                         }
                     }
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP, MotionEvent.ACTION_CANCEL -> {
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                    if (circleHoldConverted && selectedDragActive) onSelectedTransformEnd()
+                    selectedDragActive = false
+                    selectedDragMoved = false
                     cancelPendingCircleLasso()
                     releaseParentIntercept()
+                    dryView.invalidate()
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    if (circleHoldConverted && selectedDragActive) onSelectedTransformCancel()
+                    selectedDragActive = false
+                    selectedDragMoved = false
+                    cancelPendingCircleLasso()
+                    releaseParentIntercept()
+                    dryView.invalidate()
                 }
             }
             return true
@@ -718,12 +760,13 @@ class InkPageView(context: Context) : FrameLayout(context) {
 
         val candidate = circleLassoCandidate ?: return false
         val point = mapViewToWorld(event.getX(pointerIndex), event.getY(pointerIndex))
-        if (!isPointInsideClosedLoop(point.x, point.y, candidate.samples)) return false
+        if (!isPointOnClosedLoop(point.x, point.y, candidate.samples)) return false
 
         requestDisallowInterceptTouchEvent(true)
         onActivated()
         circleHoldGestureActive = true
         circleHoldCancelled = false
+        circleHoldConverted = false
         circleHoldPointerId = event.getPointerId(pointerIndex)
         circleHoldStartX = point.x
         circleHoldStartY = point.y
@@ -733,6 +776,11 @@ class InkPageView(context: Context) : FrameLayout(context) {
             circleLassoCandidate = null
             lassoOutline = current.samples.map { PointF(it.x, it.y) }
             onCircleHoldLasso(current.strokeId, current.stroke)
+            circleHoldConverted = true
+            selectedDragActive = onSelectedTransformStart()
+            selectedDragMoved = false
+            selectedDragStartX = circleHoldStartX
+            selectedDragStartY = circleHoldStartY
             dryView.postInvalidateOnAnimation()
         }
         circleHoldRunnable = runnable
@@ -746,20 +794,41 @@ class InkPageView(context: Context) : FrameLayout(context) {
         circleHoldPointerId = null
         circleHoldGestureActive = false
         circleHoldCancelled = false
+        circleHoldConverted = false
     }
 
-    private fun isPointInsideClosedLoop(x: Float, y: Float, samples: List<InkSample>): Boolean {
+    private fun isPointOnClosedLoop(x: Float, y: Float, samples: List<InkSample>): Boolean {
         if (samples.size < 3) return false
-        var inside = false
-        var previous = samples.last()
-        samples.forEach { current ->
-            val crosses = (current.y > y) != (previous.y > y) &&
-                x < (previous.x - current.x) * (y - current.y) /
-                (previous.y - current.y) + current.x
-            if (crosses) inside = !inside
-            previous = current
+        val tolerance = CIRCLE_HOLD_HIT_RADIUS / viewport.zoom
+        val toleranceSquared = tolerance * tolerance
+        val segments = samples.zipWithNext() + listOf(samples.last() to samples.first())
+        return segments.any { (a, b) ->
+            squaredDistancePointToSegment(x, y, a.x, a.y, b.x, b.y) <= toleranceSquared
         }
-        return inside
+    }
+
+    private fun squaredDistancePointToSegment(
+        px: Float,
+        py: Float,
+        ax: Float,
+        ay: Float,
+        bx: Float,
+        by: Float,
+    ): Float {
+        val dx = bx - ax
+        val dy = by - ay
+        val denominator = dx * dx + dy * dy
+        if (denominator <= 0.000001f) {
+            val pointDx = px - ax
+            val pointDy = py - ay
+            return pointDx * pointDx + pointDy * pointDy
+        }
+        val t = (((px - ax) * dx + (py - ay) * dy) / denominator).coerceIn(0f, 1f)
+        val nearestX = ax + t * dx
+        val nearestY = ay + t * dy
+        val pointDx = px - nearestX
+        val pointDy = py - nearestY
+        return pointDx * pointDx + pointDy * pointDy
     }
 
     private fun looksLikeClosedLoop(runtime: RuntimeStroke): Boolean {
@@ -796,6 +865,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private companion object {
         const val CIRCLE_HOLD_DELAY_MS = 650L
         const val CIRCLE_HOLD_SLOP = 18f
+        const val CIRCLE_HOLD_HIT_RADIUS = 24f
+        const val SELECTED_DRAG_SLOP = 6f
         const val MIN_CIRCLE_DIAMETER = 72f
         const val MAX_CIRCLE_GAP = 28f
         const val MAX_CIRCLE_GAP_RATIO = 0.24f

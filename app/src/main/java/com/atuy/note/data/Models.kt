@@ -48,6 +48,7 @@ data class FolderRecord(
     val id: String = UUID.randomUUID().toString(),
     val name: String,
     val parentId: String? = null,
+    val trashedAt: Long? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = createdAt,
 )
@@ -63,6 +64,7 @@ data class NoteSummary(
     val id: String,
     val title: String,
     val folderId: String? = null,
+    val trashedAt: Long? = null,
     val updatedAt: Long,
     val revision: Long,
     val pageCount: Int,
@@ -75,6 +77,7 @@ data class NoteDocument(
     val id: String = UUID.randomUUID().toString(),
     val title: String,
     val folderId: String? = null,
+    val trashedAt: Long? = null,
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = createdAt,
     val revision: Long = 0,
@@ -589,6 +592,7 @@ class NoteSession(
     val createdAt: Long = document.createdAt
     var title by mutableStateOf(document.title)
     var folderId by mutableStateOf(document.folderId)
+    var trashedAt by mutableStateOf(document.trashedAt)
     var updatedAt by mutableStateOf(document.updatedAt)
     var revision by mutableStateOf(document.revision)
     var dirty by mutableStateOf(false)
@@ -605,6 +609,7 @@ class NoteSession(
             id = id,
             title = title,
             folderId = folderId,
+            trashedAt = trashedAt,
             createdAt = createdAt,
             updatedAt = if (nextRevision) now else updatedAt,
             revision = revisionValue,

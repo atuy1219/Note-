@@ -2,7 +2,6 @@ package com.atuy.note.ui
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
@@ -26,6 +25,8 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
@@ -63,8 +64,10 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.DriveFileMove
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.EmojiEmotions
 import androidx.compose.material.icons.filled.Folder
@@ -79,8 +82,10 @@ import androidx.compose.material.icons.filled.LineWeight
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.NearMe
 import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.RestoreFromTrash
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -95,6 +100,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -124,7 +131,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -150,10 +156,6 @@ import com.atuy.note.data.PageSession
 import com.atuy.note.data.ScrollAxis
 import com.atuy.note.data.ToolMode
 import com.atuy.note.ink.InkPageView
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -408,16 +410,18 @@ private fun HomeScreen(
     var createNote by remember { mutableStateOf(false) }
     var createFolder by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
+    var renameTarget by remember { mutableStateOf<LibraryTarget?>(null) }
+    var moveTarget by remember { mutableStateOf<LibraryTarget?>(null) }
+    var trashTarget by remember { mutableStateOf<LibraryTarget?>(null) }
+    var deleteTarget by remember { mutableStateOf<LibraryTarget?>(null) }
+    var emptyTrash by remember { mutableStateOf(false) }
+
     val normalizedQuery = query.trim()
-    val folders = if (normalizedQuery.isBlank()) {
-        viewModel.childFolders
-    } else {
-        viewModel.childFolders.filter { it.name.contains(normalizedQuery, ignoreCase = true) }
+    val folders = viewModel.childFolders.filter {
+        normalizedQuery.isBlank() || it.name.contains(normalizedQuery, ignoreCase = true)
     }
-    val notes = if (normalizedQuery.isBlank()) {
-        viewModel.visibleNotes
-    } else {
-        viewModel.visibleNotes.filter { it.title.contains(normalizedQuery, ignoreCase = true) }
+    val notes = viewModel.visibleNotes.filter {
+        normalizedQuery.isBlank() || it.title.contains(normalizedQuery, ignoreCase = true)
     }
 
     Scaffold(
@@ -427,33 +431,58 @@ private fun HomeScreen(
                 TopAppBar(
                     title = {
                         Column {
-                            Text(viewModel.currentFolder?.name ?: "書類")
                             Text(
-                                "${viewModel.visibleNotes.size}件のノート",
+                                when {
+                                    viewModel.showingTrash -> "ゴミ箱"
+                                    viewModel.currentFolder != null -> viewModel.currentFolder!!.name
+                                    else -> "書類"
+                                },
+                            )
+                            Text(
+                                if (viewModel.showingTrash) {
+                                    "${viewModel.trashItemCount}件"
+                                } else {
+                                    "${viewModel.visibleNotes.size}件のノート"
+                                },
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     },
                     navigationIcon = {
-                        if (viewModel.currentFolderId != null) {
+                        if (!viewModel.showingTrash && viewModel.currentFolderId != null) {
                             IconButton(onClick = viewModel::navigateUpFolder) {
                                 Icon(Icons.AutoMirrored.Filled.ArrowBack, "親フォルダー")
                             }
                         }
                     },
                     actions = {
-                        IconButton(onClick = onSyncDrive) {
-                            Icon(Icons.Default.CloudSync, "Google Driveと同期")
-                        }
-                        IconButton(onClick = onImportPdf) {
-                            Icon(Icons.Default.PictureAsPdf, "PDFを読み込む")
-                        }
-                        IconButton(onClick = { createFolder = true }) {
-                            Icon(Icons.Default.CreateNewFolder, "フォルダーを作成")
-                        }
-                        IconButton(onClick = { createNote = true }) {
-                            Icon(Icons.Default.Add, "ノートを作成")
+                        if (viewModel.showingTrash) {
+                            IconButton(
+                                enabled = viewModel.trashItemCount > 0,
+                                onClick = { emptyTrash = true },
+                            ) {
+                                Icon(Icons.Default.DeleteForever, "ゴミ箱を空にする")
+                            }
+                            IconButton(onClick = viewModel::showDocuments) {
+                                Icon(Icons.Default.Home, "書類へ戻る")
+                            }
+                        } else {
+                            IconButton(onClick = onSyncDrive) {
+                                Icon(Icons.Default.CloudSync, "Google Driveと同期")
+                            }
+                            IconButton(onClick = onImportPdf) {
+                                Icon(Icons.Default.PictureAsPdf, "PDFを読み込む")
+                            }
+                            IconButton(onClick = { createFolder = true }) {
+                                Icon(Icons.Default.CreateNewFolder, "フォルダーを作成")
+                            }
+                            IconButton(onClick = { createNote = true }) {
+                                Icon(Icons.Default.Add, "ノートを作成")
+                            }
+                            IconButton(onClick = viewModel::showTrash) {
+                                Icon(Icons.Default.DeleteOutline, "ゴミ箱")
+                            }
                         }
                         IconButton(onClick = onOpenSettings) {
                             Icon(Icons.Default.Settings, "設定")
@@ -467,7 +496,9 @@ private fun HomeScreen(
                         .padding(horizontal = 16.dp, vertical = 8.dp),
                     singleLine = true,
                     leadingIcon = { Icon(Icons.Default.Search, null) },
-                    placeholder = { Text("ノートとフォルダーを検索") },
+                    placeholder = {
+                        Text(if (viewModel.showingTrash) "ゴミ箱を検索" else "ノートとフォルダーを検索")
+                    },
                 )
             }
         },
@@ -476,16 +507,30 @@ private fun HomeScreen(
             if (maxWidth >= 840.dp) {
                 Row(Modifier.fillMaxSize()) {
                     HomeFolderSidebar(
-                        folders = viewModel.library.folders,
+                        folders = viewModel.activeFolders,
                         selected = viewModel.currentFolderId,
+                        showingTrash = viewModel.showingTrash,
+                        onDocuments = viewModel::showDocuments,
+                        onTrash = viewModel::showTrash,
                         onSelect = viewModel::enterFolder,
                     )
                     VerticalDivider()
                     HomeGrid(
                         folders = folders,
                         notes = notes,
+                        showingTrash = viewModel.showingTrash,
                         onFolder = { viewModel.enterFolder(it.id) },
                         onNote = { viewModel.openNote(it.id) },
+                        onRename = { renameTarget = it },
+                        onMove = { moveTarget = it },
+                        onTrash = { trashTarget = it },
+                        onRestore = { target ->
+                            when (target) {
+                                is LibraryTarget.Note -> viewModel.restoreLibraryNote(target.value.id)
+                                is LibraryTarget.Folder -> viewModel.restoreLibraryFolder(target.value.id)
+                            }
+                        },
+                        onDelete = { deleteTarget = it },
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -493,8 +538,19 @@ private fun HomeScreen(
                 HomeGrid(
                     folders = folders,
                     notes = notes,
+                    showingTrash = viewModel.showingTrash,
                     onFolder = { viewModel.enterFolder(it.id) },
                     onNote = { viewModel.openNote(it.id) },
+                    onRename = { renameTarget = it },
+                    onMove = { moveTarget = it },
+                    onTrash = { trashTarget = it },
+                    onRestore = { target ->
+                        when (target) {
+                            is LibraryTarget.Note -> viewModel.restoreLibraryNote(target.value.id)
+                            is LibraryTarget.Folder -> viewModel.restoreLibraryFolder(target.value.id)
+                        }
+                    },
+                    onDelete = { deleteTarget = it },
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -513,12 +569,133 @@ private fun HomeScreen(
             viewModel.createFolder(it)
         }
     }
+
+    renameTarget?.let { target ->
+        NameDialog("名前を変更", target.label, onDismiss = { renameTarget = null }) { name ->
+            renameTarget = null
+            when (target) {
+                is LibraryTarget.Note -> viewModel.renameLibraryNote(target.value.id, name)
+                is LibraryTarget.Folder -> viewModel.renameLibraryFolder(target.value.id, name)
+            }
+        }
+    }
+
+    moveTarget?.let { target ->
+        val destinations = when (target) {
+            is LibraryTarget.Note -> viewModel.activeFolders
+            is LibraryTarget.Folder -> viewModel.moveTargetsForFolder(target.value.id)
+        }
+        val currentDestination = when (target) {
+            is LibraryTarget.Note -> target.value.folderId
+            is LibraryTarget.Folder -> target.value.parentId
+        }
+        MoveDialog(
+            itemName = target.label,
+            folders = destinations,
+            initialFolderId = currentDestination,
+            onDismiss = { moveTarget = null },
+        ) { folderId ->
+            moveTarget = null
+            when (target) {
+                is LibraryTarget.Note -> viewModel.moveLibraryNote(target.value.id, folderId)
+                is LibraryTarget.Folder -> viewModel.moveLibraryFolder(target.value.id, folderId)
+            }
+        }
+    }
+
+    trashTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { trashTarget = null },
+            title = { Text("ゴミ箱へ移動") },
+            text = {
+                Text(
+                    if (target is LibraryTarget.Folder) {
+                        "「${target.label}」と中の項目をゴミ箱へ移動します。"
+                    } else {
+                        "「${target.label}」をゴミ箱へ移動します。"
+                    },
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    trashTarget = null
+                    when (target) {
+                        is LibraryTarget.Note -> viewModel.trashLibraryNote(target.value.id)
+                        is LibraryTarget.Folder -> viewModel.trashLibraryFolder(target.value.id)
+                    }
+                }) { Text("移動") }
+            },
+            dismissButton = {
+                TextButton(onClick = { trashTarget = null }) { Text("キャンセル") }
+            },
+        )
+    }
+
+    deleteTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("完全に削除") },
+            text = {
+                Text(
+                    if (target is LibraryTarget.Folder) {
+                        "「${target.label}」と中の項目を完全に削除します。元に戻せません。"
+                    } else {
+                        "「${target.label}」を完全に削除します。元に戻せません。"
+                    },
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    deleteTarget = null
+                    when (target) {
+                        is LibraryTarget.Note -> viewModel.deleteLibraryNote(target.value.id)
+                        is LibraryTarget.Folder -> viewModel.deleteLibraryFolder(target.value.id)
+                    }
+                }) { Text("削除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) { Text("キャンセル") }
+            },
+        )
+    }
+
+    if (emptyTrash) {
+        AlertDialog(
+            onDismissRequest = { emptyTrash = false },
+            title = { Text("ゴミ箱を空にする") },
+            text = { Text("ゴミ箱内のすべての項目を完全に削除します。元に戻せません。") },
+            confirmButton = {
+                Button(onClick = {
+                    emptyTrash = false
+                    viewModel.emptyTrash()
+                }) { Text("すべて削除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { emptyTrash = false }) { Text("キャンセル") }
+            },
+        )
+    }
+}
+
+private sealed interface LibraryTarget {
+    val label: String
+
+    data class Note(val value: NoteSummary) : LibraryTarget {
+        override val label: String get() = value.title
+    }
+
+    data class Folder(val value: FolderRecord) : LibraryTarget {
+        override val label: String get() = value.name
+    }
 }
 
 @Composable
 private fun HomeFolderSidebar(
     folders: List<FolderRecord>,
     selected: String?,
+    showingTrash: Boolean,
+    onDocuments: () -> Unit,
+    onTrash: () -> Unit,
     onSelect: (String?) -> Unit,
 ) {
     Surface(
@@ -530,7 +707,10 @@ private fun HomeFolderSidebar(
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             item {
-                SidebarItem("書類", Icons.Default.Home, selected == null) { onSelect(null) }
+                SidebarItem("書類", Icons.Default.Home, !showingTrash && selected == null, onClick = onDocuments)
+            }
+            item {
+                SidebarItem("ゴミ箱", Icons.Default.DeleteOutline, showingTrash, onClick = onTrash)
             }
             items(
                 folders.sortedWith(
@@ -541,7 +721,7 @@ private fun HomeFolderSidebar(
                 SidebarItem(
                     folder.name,
                     Icons.Default.Folder,
-                    selected == folder.id,
+                    !showingTrash && selected == folder.id,
                     indent = folder.parentId != null,
                 ) { onSelect(folder.id) }
             }
@@ -582,8 +762,14 @@ private fun SidebarItem(
 private fun HomeGrid(
     folders: List<FolderRecord>,
     notes: List<NoteSummary>,
+    showingTrash: Boolean,
     onFolder: (FolderRecord) -> Unit,
     onNote: (NoteSummary) -> Unit,
+    onRename: (LibraryTarget) -> Unit,
+    onMove: (LibraryTarget) -> Unit,
+    onTrash: (LibraryTarget) -> Unit,
+    onRestore: (LibraryTarget) -> Unit,
+    onDelete: (LibraryTarget) -> Unit,
     modifier: Modifier,
 ) {
     if (folders.isEmpty() && notes.isEmpty()) {
@@ -593,12 +779,12 @@ private fun HomeGrid(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Icon(
-                    Icons.Default.Description,
+                    if (showingTrash) Icons.Default.DeleteOutline else Icons.Default.Description,
                     null,
                     Modifier.size(52.dp),
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Text("このフォルダーにはノートがありません")
+                Text(if (showingTrash) "ゴミ箱は空です" else "このフォルダーにはノートがありません")
             }
         }
         return
@@ -612,76 +798,214 @@ private fun HomeGrid(
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
         items(folders, key = { "folder-${it.id}" }) { folder ->
+            val target = LibraryTarget.Folder(folder)
             Card(
-                onClick = { onFolder(folder) },
+                onClick = { if (!showingTrash) onFolder(folder) },
                 modifier = Modifier.fillMaxWidth().height(210.dp),
             ) {
-                Column(
-                    Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Icon(
-                        Icons.Default.Folder,
-                        null,
-                        Modifier.size(64.dp),
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                    Text(
-                        folder.name,
-                        Modifier.padding(12.dp),
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
+                Box(Modifier.fillMaxSize()) {
+                    Column(
+                        Modifier.fillMaxSize(),
+                        verticalArrangement = Arrangement.Center,
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Icon(
+                            Icons.Default.Folder,
+                            null,
+                            Modifier.size(64.dp),
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                        Text(
+                            folder.name,
+                            Modifier.padding(12.dp),
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    LibraryItemMenu(
+                        showingTrash = showingTrash,
+                        onRename = { onRename(target) },
+                        onMove = { onMove(target) },
+                        onTrash = { onTrash(target) },
+                        onRestore = { onRestore(target) },
+                        onDelete = { onDelete(target) },
+                        modifier = Modifier.align(Alignment.TopEnd),
                     )
                 }
             }
         }
         items(notes, key = { it.id }) { note ->
+            val target = LibraryTarget.Note(note)
             val bitmap = remember(note.thumbnailPath, note.updatedAt) {
                 note.thumbnailPath?.let(BitmapFactory::decodeFile)
             }
             Card(
-                onClick = { onNote(note) },
+                onClick = { if (!showingTrash) onNote(note) },
                 modifier = Modifier.fillMaxWidth().height(250.dp),
             ) {
-                Column(Modifier.fillMaxSize()) {
-                    Box(
-                        Modifier.fillMaxWidth().weight(1f).background(Color.White),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        if (bitmap != null) {
-                            Image(
-                                bitmap = bitmap.asImageBitmap(),
-                                contentDescription = null,
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Crop,
+                Box(Modifier.fillMaxSize()) {
+                    Column(Modifier.fillMaxSize()) {
+                        Box(
+                            Modifier.fillMaxWidth().weight(1f).background(Color.White),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (bitmap != null) {
+                                Image(
+                                    bitmap = bitmap.asImageBitmap(),
+                                    contentDescription = null,
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentScale = ContentScale.Crop,
+                                )
+                            } else {
+                                Icon(
+                                    Icons.Default.Description,
+                                    null,
+                                    Modifier.size(48.dp),
+                                    tint = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                        }
+                        Column(Modifier.padding(12.dp)) {
+                            Text(
+                                note.title,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
                             )
-                        } else {
-                            Icon(
-                                Icons.Default.Description,
-                                null,
-                                Modifier.size(48.dp),
-                                tint = MaterialTheme.colorScheme.primary,
+                            Text(
+                                "${note.pageCount}ページ",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
-                    Column(Modifier.padding(12.dp)) {
-                        Text(
-                            note.title,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        Text(
-                            "${note.pageCount}ページ",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
+                    LibraryItemMenu(
+                        showingTrash = showingTrash,
+                        onRename = { onRename(target) },
+                        onMove = { onMove(target) },
+                        onTrash = { onTrash(target) },
+                        onRestore = { onRestore(target) },
+                        onDelete = { onDelete(target) },
+                        modifier = Modifier.align(Alignment.TopEnd),
+                    )
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun LibraryItemMenu(
+    showingTrash: Boolean,
+    onRename: () -> Unit,
+    onMove: () -> Unit,
+    onTrash: () -> Unit,
+    onRestore: () -> Unit,
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier) {
+        IconButton(onClick = { expanded = true }) {
+            Icon(Icons.Default.MoreVert, "項目メニュー")
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            if (showingTrash) {
+                DropdownMenuItem(
+                    text = { Text("元に戻す") },
+                    leadingIcon = { Icon(Icons.Default.RestoreFromTrash, null) },
+                    onClick = {
+                        expanded = false
+                        onRestore()
+                    },
+                )
+            } else {
+                DropdownMenuItem(
+                    text = { Text("名前を変更") },
+                    leadingIcon = { Icon(Icons.Default.Edit, null) },
+                    onClick = {
+                        expanded = false
+                        onRename()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("移動") },
+                    leadingIcon = { Icon(Icons.Default.DriveFileMove, null) },
+                    onClick = {
+                        expanded = false
+                        onMove()
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("ゴミ箱へ移動") },
+                    leadingIcon = { Icon(Icons.Default.DeleteOutline, null) },
+                    onClick = {
+                        expanded = false
+                        onTrash()
+                    },
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("完全に削除") },
+                leadingIcon = { Icon(Icons.Default.DeleteForever, null) },
+                onClick = {
+                    expanded = false
+                    onDelete()
+                },
+            )
+        }
+    }
+}
+
+@Composable
+private fun MoveDialog(
+    itemName: String,
+    folders: List<FolderRecord>,
+    initialFolderId: String?,
+    onDismiss: () -> Unit,
+    onConfirm: (String?) -> Unit,
+) {
+    var selectedFolderId by remember(itemName, initialFolderId) { mutableStateOf(initialFolderId) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("移動先を選択") },
+        text = {
+            Column(
+                Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                MoveDestinationRow("書類", selectedFolderId == null) { selectedFolderId = null }
+                folders.forEach { folder ->
+                    MoveDestinationRow(folder.name, selectedFolderId == folder.id) {
+                        selectedFolderId = folder.id
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onConfirm(selectedFolderId) }) { Text("移動") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("キャンセル") }
+        },
+    )
+}
+
+@Composable
+private fun MoveDestinationRow(label: String, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium).clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Icon(
+            if (selected) Icons.Default.CheckCircle else Icons.Default.Folder,
+            null,
+            tint = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(label, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -847,129 +1171,175 @@ private fun EditorCommandBar(
     onToggleReadOnly: () -> Unit,
     onPanel: (EditorPanel) -> Unit,
 ) {
-    val buttons = listOf(
-        CommandSpec(Icons.Default.Menu, "ページ一覧", showPages, onClick = onTogglePages),
-        CommandSpec(Icons.Default.Search, "検索", activePanel == EditorPanel.SEARCH) {
-            onPanel(EditorPanel.SEARCH)
-        },
-        CommandSpec(Icons.Default.AutoAwesome, "AI", activePanel == EditorPanel.AI) {
-            onPanel(EditorPanel.AI)
-        },
-        CommandSpec(
-            Icons.Default.Visibility,
-            "閲覧専用",
-            readOnly,
-            gapAfter = true,
-            onClick = onToggleReadOnly,
-        ),
-        CommandSpec(
-            Icons.Default.Gesture,
-            "投げ縄",
-            !readOnly && viewModel.toolMode == ToolMode.LASSO,
-        ) {
-            if (!readOnly) {
-                viewModel.setTool(ToolMode.LASSO)
-                onPanel(EditorPanel.LASSO)
-            }
-        },
-        CommandSpec(
-            Icons.Default.Brush,
-            "ペン",
-            !readOnly && viewModel.toolMode == ToolMode.PEN &&
-                viewModel.brushSpec.kind != BrushKind.HIGHLIGHTER,
-        ) {
-            if (!readOnly) {
-                if (viewModel.brushSpec.kind == BrushKind.HIGHLIGHTER) {
-                    viewModel.setBrushKind(BrushKind.PRESSURE_PEN)
-                } else {
-                    viewModel.setTool(ToolMode.PEN)
-                }
-                onPanel(EditorPanel.PEN)
-            }
-        },
-        CommandSpec(
-            Icons.Default.DeleteOutline,
-            "消しゴム",
-            !readOnly && viewModel.toolMode == ToolMode.ERASER,
-        ) {
-            if (!readOnly) {
-                viewModel.setTool(ToolMode.ERASER)
-                onPanel(EditorPanel.ERASER)
-            }
-        },
-        CommandSpec(Icons.Default.TextFields, "テキスト", activePanel == EditorPanel.TEXT) {
-            onPanel(EditorPanel.TEXT)
-        },
-        CommandSpec(
-            Icons.Default.EmojiEmotions,
-            "ステッカー",
-            activePanel == EditorPanel.STICKER,
-        ) {
-            onPanel(EditorPanel.STICKER)
-        },
-        CommandSpec(
-            Icons.Default.Image,
-            "画像",
-            !readOnly && viewModel.toolMode == ToolMode.IMAGE,
-        ) {
-            if (!readOnly) {
-                viewModel.setTool(ToolMode.IMAGE)
-                onPanel(EditorPanel.IMAGE)
-            }
-        },
-        CommandSpec(Icons.Default.Category, "シェイプ", activePanel == EditorPanel.SHAPE) {
-            onPanel(EditorPanel.SHAPE)
-        },
-        CommandSpec(Icons.AutoMirrored.Filled.StickyNote2, "付箋", activePanel == EditorPanel.STICKY) {
-            onPanel(EditorPanel.STICKY)
-        },
-        CommandSpec(Icons.Default.NearMe, "ポインタ", activePanel == EditorPanel.POINTER) {
-            onPanel(EditorPanel.POINTER)
-        },
-        CommandSpec(
-            icon = Icons.Default.Mic,
-            description = "音声",
-            selected = activePanel == EditorPanel.VOICE,
-            onClick = { onPanel(EditorPanel.VOICE) },
-            gapAfter = true,
-        ),
-        CommandSpec(Icons.AutoMirrored.Filled.NoteAdd, "ページ追加", false, onClick = viewModel::addPage),
-        CommandSpec(Icons.Default.Share, "共有", false) {
-            viewModel.saveActive()
-            viewModel.reportStatus("ノートを保存しました")
-        },
-        CommandSpec(Icons.Default.MoreHoriz, "詳細", activePanel == EditorPanel.DETAILS) {
-            onPanel(EditorPanel.DETAILS)
-        },
+    val details = CommandSpec(Icons.Default.MoreHoriz, "詳細", activePanel == EditorPanel.DETAILS) {
+        onPanel(EditorPanel.DETAILS)
+    }
+    val share = CommandSpec(Icons.Default.Share, "共有", false) {
+        viewModel.saveActive()
+        viewModel.reportStatus("ノートを保存しました")
+    }
+    val addPage = CommandSpec(
+        Icons.AutoMirrored.Filled.NoteAdd,
+        "ページ追加",
+        false,
+        viewModel::addPage,
     )
+    val pen = CommandSpec(
+        Icons.Default.Brush,
+        "ペン",
+        !readOnly && viewModel.toolMode == ToolMode.PEN &&
+            viewModel.brushSpec.kind != BrushKind.HIGHLIGHTER,
+    ) {
+        if (!readOnly) {
+            if (viewModel.brushSpec.kind == BrushKind.HIGHLIGHTER) {
+                viewModel.setBrushKind(BrushKind.PRESSURE_PEN)
+            } else {
+                viewModel.setTool(ToolMode.PEN)
+            }
+            onPanel(EditorPanel.PEN)
+        }
+    }
+    val eraser = CommandSpec(
+        Icons.Default.DeleteOutline,
+        "消しゴム",
+        !readOnly && viewModel.toolMode == ToolMode.ERASER,
+    ) {
+        if (!readOnly) {
+            viewModel.setTool(ToolMode.ERASER)
+            onPanel(EditorPanel.ERASER)
+        }
+    }
+    val text = CommandSpec(Icons.Default.TextFields, "テキスト", activePanel == EditorPanel.TEXT) {
+        onPanel(EditorPanel.TEXT)
+    }
+    val sticker = CommandSpec(
+        Icons.Default.EmojiEmotions,
+        "ステッカー",
+        activePanel == EditorPanel.STICKER,
+    ) { onPanel(EditorPanel.STICKER) }
+    val lasso = CommandSpec(
+        Icons.Default.Gesture,
+        "投げ縄",
+        !readOnly && viewModel.toolMode == ToolMode.LASSO,
+    ) {
+        if (!readOnly) {
+            viewModel.setTool(ToolMode.LASSO)
+            onPanel(EditorPanel.LASSO)
+        }
+    }
+    val image = CommandSpec(
+        Icons.Default.Image,
+        "画像",
+        !readOnly && viewModel.toolMode == ToolMode.IMAGE,
+    ) {
+        if (!readOnly) {
+            viewModel.setTool(ToolMode.IMAGE)
+            onPanel(EditorPanel.IMAGE)
+        }
+    }
+    val shape = CommandSpec(Icons.Default.Category, "シェイプ", activePanel == EditorPanel.SHAPE) {
+        onPanel(EditorPanel.SHAPE)
+    }
+    val sticky = CommandSpec(
+        Icons.AutoMirrored.Filled.StickyNote2,
+        "付箋",
+        activePanel == EditorPanel.STICKY,
+    ) { onPanel(EditorPanel.STICKY) }
+    val pointer = CommandSpec(Icons.Default.NearMe, "ポインタ", activePanel == EditorPanel.POINTER) {
+        onPanel(EditorPanel.POINTER)
+    }
+    val voice = CommandSpec(Icons.Default.Mic, "音声", activePanel == EditorPanel.VOICE) {
+        onPanel(EditorPanel.VOICE)
+    }
+    val readOnlyCommand = CommandSpec(Icons.Default.Visibility, "閲覧専用", readOnly, onToggleReadOnly)
+    val ai = CommandSpec(Icons.Default.AutoAwesome, "AI", activePanel == EditorPanel.AI) {
+        onPanel(EditorPanel.AI)
+    }
+    val search = CommandSpec(Icons.Default.Search, "検索", activePanel == EditorPanel.SEARCH) {
+        onPanel(EditorPanel.SEARCH)
+    }
+    val pages = CommandSpec(Icons.Default.Menu, "ページ一覧", showPages, onTogglePages)
+
+    val detailBlock = listOf(addPage, share, details)
+    val toolsBeforeLasso = listOf(pen, eraser, text, sticker)
+    val toolsAfterLasso = listOf(image, shape, sticky, pointer, voice)
+    val pageBlock = listOf(pages, search, ai, readOnlyCommand)
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
         tonalElevation = 3.dp,
     ) {
-        if (vertical) {
-            LazyColumn(
-                modifier = Modifier.width(64.dp).fillMaxHeight(),
-                contentPadding = PaddingValues(vertical = 6.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                items(buttons) { spec ->
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        CommandButton(spec)
-                        if (spec.gapAfter) Spacer(Modifier.height(14.dp))
+        BoxWithConstraints {
+            if (vertical) {
+                if (maxHeight >= 1040.dp) {
+                    val beforeHeight = COMMAND_EXTENT * toolsBeforeLasso.size.toFloat()
+                    val afterHeight = COMMAND_EXTENT * toolsAfterLasso.size.toFloat()
+                    Box(Modifier.width(COMMAND_EXTENT).fillMaxHeight().padding(vertical = 6.dp)) {
+                        CommandColumn(detailBlock, Modifier.align(Alignment.TopCenter))
+                        CommandColumn(pageBlock, Modifier.align(Alignment.BottomCenter))
+                        CommandColumn(
+                            toolsBeforeLasso,
+                            Modifier.align(Alignment.Center).offset(
+                                y = -(COMMAND_EXTENT / 2f + beforeHeight / 2f),
+                            ),
+                        )
+                        CommandButton(lasso, Modifier.align(Alignment.Center))
+                        CommandColumn(
+                            toolsAfterLasso,
+                            Modifier.align(Alignment.Center).offset(
+                                y = COMMAND_EXTENT / 2f + afterHeight / 2f,
+                            ),
+                        )
+                    }
+                } else {
+                    Column(
+                        Modifier.width(COMMAND_EXTENT).fillMaxHeight().verticalScroll(rememberScrollState())
+                            .padding(vertical = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        CommandColumn(detailBlock)
+                        Spacer(Modifier.height(14.dp))
+                        CommandColumn(toolsBeforeLasso)
+                        CommandButton(lasso)
+                        CommandColumn(toolsAfterLasso)
+                        Spacer(Modifier.height(14.dp))
+                        CommandColumn(pageBlock)
                     }
                 }
-            }
-        } else {
-            LazyRow(
-                modifier = Modifier.fillMaxWidth().height(62.dp),
-                contentPadding = PaddingValues(horizontal = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                items(buttons) { spec ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CommandButton(spec)
-                        if (spec.gapAfter) Spacer(Modifier.width(14.dp))
+            } else {
+                if (maxWidth >= 1040.dp) {
+                    val beforeWidth = COMMAND_EXTENT * toolsBeforeLasso.size.toFloat()
+                    val afterWidth = COMMAND_EXTENT * toolsAfterLasso.size.toFloat()
+                    Box(Modifier.fillMaxWidth().height(COMMAND_EXTENT).padding(horizontal = 8.dp)) {
+                        CommandRow(detailBlock, Modifier.align(Alignment.CenterStart))
+                        CommandRow(pageBlock, Modifier.align(Alignment.CenterEnd))
+                        CommandRow(
+                            toolsBeforeLasso,
+                            Modifier.align(Alignment.Center).offset(
+                                x = -(COMMAND_EXTENT / 2f + beforeWidth / 2f),
+                            ),
+                        )
+                        CommandButton(lasso, Modifier.align(Alignment.Center))
+                        CommandRow(
+                            toolsAfterLasso,
+                            Modifier.align(Alignment.Center).offset(
+                                x = COMMAND_EXTENT / 2f + afterWidth / 2f,
+                            ),
+                        )
+                    }
+                } else {
+                    Row(
+                        Modifier.fillMaxWidth().height(COMMAND_EXTENT)
+                            .horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CommandRow(detailBlock)
+                        Spacer(Modifier.width(14.dp))
+                        CommandRow(toolsBeforeLasso)
+                        CommandButton(lasso)
+                        CommandRow(toolsAfterLasso)
+                        Spacer(Modifier.width(14.dp))
+                        CommandRow(pageBlock)
                     }
                 }
             }
@@ -981,14 +1351,38 @@ private data class CommandSpec(
     val icon: ImageVector,
     val description: String,
     val selected: Boolean,
-    val gapAfter: Boolean = false,
     val onClick: () -> Unit,
 )
 
+private val COMMAND_EXTENT = 52.dp
+
 @Composable
-private fun CommandButton(spec: CommandSpec) {
+private fun CommandRow(
+    commands: List<CommandSpec>,
+    modifier: Modifier = Modifier,
+) {
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        commands.forEach { CommandButton(it) }
+    }
+}
+
+@Composable
+private fun CommandColumn(
+    commands: List<CommandSpec>,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        commands.forEach { CommandButton(it) }
+    }
+}
+
+@Composable
+private fun CommandButton(
+    spec: CommandSpec,
+    modifier: Modifier = Modifier,
+) {
     Surface(
-        modifier = Modifier.padding(2.dp),
+        modifier = modifier.size(COMMAND_EXTENT).padding(2.dp),
         shape = CircleShape,
         color = if (spec.selected) {
             MaterialTheme.colorScheme.primaryContainer
@@ -1245,7 +1639,7 @@ private fun ToolChoice(
 private fun LassoPanel(viewModel: MainViewModel) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(
-            "投げ縄はスタイラスで自由な形に囲めます。線を離すと始点と終点を結んで選択範囲を閉じます。",
+            "通常の投げ縄は投げ縄ツールで囲みます。ペンの囲みを変換する場合は、閉じた線を描いてペンを離し、その線上を長押ししてください。長押ししたまま動かすと選択範囲を移動でき、囲み線は移動開始時に消えます。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -1268,7 +1662,7 @@ private fun LassoPanel(viewModel: MainViewModel) {
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Default.Gesture, null)
-            Text("囲ってペンを離した後、囲みの内側をもう一度長押し", Modifier.padding(horizontal = 8.dp).weight(1f))
+            Text("ペンで囲む → 離す → 囲み線上を長押し", Modifier.padding(horizontal = 8.dp).weight(1f))
             Switch(
                 checked = viewModel.circleToLassoEnabled,
                 onCheckedChange = viewModel::setCircleToLassoEnabled,
@@ -1805,8 +2199,6 @@ private fun ZoomPage(
     val background by produceState<Bitmap?>(initialValue = null, session.id, page.id) {
         value = viewModel.renderPdfPage(session, page, 1200)
     }
-    var circleHoldQualified by remember(page.id) { mutableStateOf(false) }
-
     Card(
         modifier = modifier,
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
@@ -1814,15 +2206,7 @@ private fun ZoomPage(
         shape = androidx.compose.ui.graphics.RectangleShape,
     ) {
         Box(
-            Modifier.fillMaxWidth()
-                .aspectRatio(page.width / page.height)
-                .circleHoldQualifier(
-                    enabled = !readOnly &&
-                        viewModel.circleToLassoEnabled &&
-                        viewModel.toolMode == ToolMode.PEN,
-                    onStrokeStart = { circleHoldQualified = false },
-                    onQualified = { circleHoldQualified = true },
-                ),
+            Modifier.fillMaxWidth().aspectRatio(page.width / page.height),
         ) {
             AndroidView(
                 factory = { context -> InkPageView(context) },
@@ -1835,25 +2219,20 @@ private fun ZoomPage(
                         toolProvider = { viewModel.toolMode },
                         brushProvider = { viewModel.brushSpec },
                         navigationGestureProvider = { viewModel.navigationGestureMode },
-                        circleToLassoEnabledProvider = { false },
+                        circleToLassoEnabledProvider = { viewModel.circleToLassoEnabled },
                         readOnlyProvider = { readOnly },
                         onNavigationPan = onNavigationPan,
-                        onStrokeAdded = { runtime ->
-                            viewModel.addStroke(page, runtime)
-                            if (circleHoldQualified) {
-                                circleHoldQualified = false
-                                viewModel.convertCircleStrokeToLasso(
-                                    page,
-                                    runtime.stored.id,
-                                    runtime.stroke,
-                                )
-                            }
-                        },
+                        onStrokeAdded = { runtime -> viewModel.addStroke(page, runtime) },
                         onEraseStart = { viewModel.beginErase(page) },
                         onErase = { x, y, radius -> viewModel.eraseAt(page, x, y, radius) },
                         onEraseEnd = { viewModel.endErase(page) },
                         onLassoFinished = { viewModel.selectWithLasso(page, it) },
-                        onCircleHoldLasso = { _, _ -> },
+                        onCircleCandidateReady = {
+                            viewModel.reportStatus("囲み線を長押しすると投げ縄に変換できます")
+                        },
+                        onCircleHoldLasso = { strokeId, stroke ->
+                            viewModel.convertCircleStrokeToLasso(page, strokeId, stroke)
+                        },
                         onSelectedTransformStart = {
                             viewModel.beginSelectedStrokeTransform(page)
                         },
@@ -1922,88 +2301,6 @@ private fun Modifier.sharedPageZoomGesture(
             if (event.changes.none { it.pressed }) break
         }
     }
-}
-
-private fun Modifier.circleHoldQualifier(
-    enabled: Boolean,
-    onStrokeStart: () -> Unit,
-    onQualified: () -> Unit,
-): Modifier = pointerInput(enabled) {
-    if (!enabled) return@pointerInput
-    coroutineScope {
-        awaitEachGesture {
-            val down = awaitFirstDown(
-                requireUnconsumed = false,
-                pass = PointerEventPass.Initial,
-            )
-            if (down.type != PointerType.Stylus) return@awaitEachGesture
-            onStrokeStart()
-            val pointerId = down.id
-            val points = mutableListOf(down.position)
-            var active = true
-            var qualified = false
-            var holdJob: Job? = null
-            var lastPoint = down.position
-            var lastMovementAt = SystemClock.uptimeMillis()
-
-            while (active) {
-                val event = awaitPointerEvent(PointerEventPass.Initial)
-                val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                if (!change.pressed) {
-                    active = false
-                    break
-                }
-                val distance = hypot(
-                    (change.position.x - lastPoint.x).toDouble(),
-                    (change.position.y - lastPoint.y).toDouble(),
-                ).toFloat()
-                if (distance >= 1.5f) {
-                    points += change.position
-                    lastPoint = change.position
-                    lastMovementAt = SystemClock.uptimeMillis()
-                    holdJob?.cancel()
-                    holdJob = null
-                }
-                if (!qualified && holdJob == null && looksLikeClosedLoop(points)) {
-                    holdJob = launch {
-                        delay(CIRCLE_HOLD_DELAY_MS)
-                        if (
-                            active &&
-                            SystemClock.uptimeMillis() - lastMovementAt >=
-                            CIRCLE_HOLD_DELAY_MS - 40L
-                        ) {
-                            qualified = true
-                            onQualified()
-                        }
-                    }
-                }
-            }
-            holdJob?.cancel()
-        }
-    }
-}
-
-private fun looksLikeClosedLoop(points: List<Offset>): Boolean {
-    if (points.size < 12) return false
-    val minX = points.minOf { it.x }
-    val maxX = points.maxOf { it.x }
-    val minY = points.minOf { it.y }
-    val maxY = points.maxOf { it.y }
-    val width = maxX - minX
-    val height = maxY - minY
-    val minimumDimension = min(width, height)
-    if (minimumDimension < 48f) return false
-    val first = points.first()
-    val last = points.last()
-    val closingDistance = hypot(
-        (last.x - first.x).toDouble(),
-        (last.y - first.y).toDouble(),
-    ).toFloat()
-    if (closingDistance > max(24f, minimumDimension * 0.25f)) return false
-    val pathLength = points.zipWithNext().sumOf { (a, b) ->
-        hypot((b.x - a.x).toDouble(), (b.y - a.y).toDouble())
-    }.toFloat()
-    return pathLength >= (width + height) * 1.15f
 }
 
 @Composable
@@ -2138,4 +2435,3 @@ private fun NameDialog(
 }
 
 private val PAGE_GAP = 10.dp
-private const val CIRCLE_HOLD_DELAY_MS = 700L

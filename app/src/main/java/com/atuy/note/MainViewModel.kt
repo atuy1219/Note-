@@ -47,6 +47,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var currentFolderId by mutableStateOf<String?>(null)
         private set
+    var showingTrash by mutableStateOf(false)
+        private set
     var toolMode by mutableStateOf(ToolMode.PEN)
         private set
     var brushSpec by mutableStateOf(BrushSpec())
@@ -99,15 +101,91 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val currentFolder: FolderRecord?
         get() = currentFolderId?.let { id -> library.folders.firstOrNull { it.id == id } }
 
+    private val effectivelyTrashedFolderIds: Set<String>
+        get() {
+            val trashed = library.folders.filter { it.trashedAt != null }.mapTo(mutableSetOf()) { it.id }
+            var changed = true
+            while (changed) {
+                changed = false
+                library.folders.forEach { folder ->
+                    if (folder.parentId in trashed && trashed.add(folder.id)) changed = true
+                }
+            }
+            return trashed
+        }
+
+    val activeFolders: List<FolderRecord>
+        get() {
+            val hidden = effectivelyTrashedFolderIds
+            return library.folders.filter { it.id !in hidden }.sortedBy { it.name.lowercase() }
+        }
+
     val childFolders: List<FolderRecord>
-        get() = library.folders.filter { it.parentId == currentFolderId }.sortedBy { it.name.lowercase() }
+        get() = if (showingTrash) {
+            library.folders.filter { folder ->
+                folder.trashedAt != null && !hasTrashedAncestor(folder)
+            }.sortedByDescending { it.trashedAt }
+        } else {
+            val hidden = effectivelyTrashedFolderIds
+            library.folders.filter { it.parentId == currentFolderId && it.id !in hidden }
+                .sortedBy { it.name.lowercase() }
+        }
 
     val visibleNotes: List<NoteSummary>
-        get() = library.notes.filter { it.folderId == currentFolderId }.sortedByDescending { it.updatedAt }
+        get() = if (showingTrash) {
+            val hidden = effectivelyTrashedFolderIds
+            library.notes.filter { note ->
+                note.trashedAt != null && note.folderId !in hidden
+            }.sortedByDescending { it.trashedAt }
+        } else {
+            val hidden = effectivelyTrashedFolderIds
+            library.notes.filter { note ->
+                note.trashedAt == null && note.folderId == currentFolderId && note.folderId !in hidden
+            }.sortedByDescending { it.updatedAt }
+        }
+
+    val trashItemCount: Int
+        get() {
+            val hidden = effectivelyTrashedFolderIds
+            val noteCount = library.notes.count { note ->
+                note.trashedAt != null && note.folderId !in hidden
+            }
+            val folderCount = library.folders.count { folder ->
+                folder.trashedAt != null && !hasTrashedAncestor(folder)
+            }
+            return noteCount + folderCount
+        }
+
+    private fun hasTrashedAncestor(folder: FolderRecord): Boolean {
+        val byId = library.folders.associateBy { it.id }
+        val visited = mutableSetOf<String>()
+        var parentId = folder.parentId
+        while (parentId != null) {
+            if (!visited.add(parentId)) return true
+            val parent = byId[parentId] ?: return false
+            if (parent.trashedAt != null) return true
+            parentId = parent.parentId
+        }
+        return false
+    }
 
     fun clearStatus() { statusMessage = null }
     fun reportStatus(message: String) { statusMessage = message }
-    fun enterFolder(id: String?) { currentFolderId = id }
+    fun enterFolder(id: String?) {
+        showingTrash = false
+        currentFolderId = id
+    }
+
+    fun showDocuments() {
+        showingTrash = false
+        currentFolderId = null
+    }
+
+    fun showTrash() {
+        showingTrash = true
+        currentFolderId = null
+    }
+
     fun navigateUpFolder() { currentFolderId = currentFolder?.parentId }
 
     fun createFolder(name: String) {
@@ -184,7 +262,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun showLibrary() { activeNoteId = null }
+    fun showLibrary() {
+        activeNoteId = null
+        showingTrash = false
+    }
 
     fun renameActiveNote(name: String) {
         val session = activeSession ?: return
@@ -207,6 +288,142 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 activeNoteId = openTabs.getOrNull(index.coerceAtMost(openTabs.lastIndex))?.id
             }
         }
+    }
+
+    fun renameLibraryNote(noteId: String, name: String) {
+        viewModelScope.launch {
+            runBusy {
+                val session = openTabs.firstOrNull { it.id == noteId }
+                if (session?.dirty == true) saveNow(session)
+                saveJobs.remove(noteId)?.cancel()
+                library = repository.renameNote(noteId, name, library)
+                session?.let {
+                    it.title = name.trim().ifBlank { "Untitled" }
+                    it.updatedAt = System.currentTimeMillis()
+                    it.revision += 1
+                    it.dirty = false
+                }
+            }
+        }
+    }
+
+    fun moveLibraryNote(noteId: String, folderId: String?) {
+        viewModelScope.launch {
+            runBusy {
+                val session = openTabs.firstOrNull { it.id == noteId }
+                if (session?.dirty == true) saveNow(session)
+                saveJobs.remove(noteId)?.cancel()
+                library = repository.moveNote(noteId, folderId, library)
+                session?.let {
+                    it.folderId = folderId
+                    it.updatedAt = System.currentTimeMillis()
+                    it.revision += 1
+                    it.dirty = false
+                }
+            }
+        }
+    }
+
+    fun trashLibraryNote(noteId: String) {
+        viewModelScope.launch {
+            runBusy {
+                val session = openTabs.firstOrNull { it.id == noteId }
+                if (session?.dirty == true) saveNow(session)
+                saveJobs.remove(noteId)?.cancel()
+                library = repository.trashNote(noteId, library)
+                openTabs.removeAll { it.id == noteId }
+                if (activeNoteId == noteId) activeNoteId = null
+            }
+        }
+    }
+
+    fun restoreLibraryNote(noteId: String) {
+        viewModelScope.launch { runBusy { library = repository.restoreNote(noteId, library) } }
+    }
+
+    fun deleteLibraryNote(noteId: String) {
+        viewModelScope.launch {
+            runBusy {
+                saveJobs.remove(noteId)?.cancel()
+                library = repository.deleteNote(noteId, library)
+                openTabs.removeAll { it.id == noteId }
+                if (activeNoteId == noteId) activeNoteId = null
+            }
+        }
+    }
+
+    fun renameLibraryFolder(folderId: String, name: String) {
+        viewModelScope.launch { runBusy { library = repository.renameFolder(folderId, name, library) } }
+    }
+
+    fun moveLibraryFolder(folderId: String, parentId: String?) {
+        viewModelScope.launch { runBusy { library = repository.moveFolder(folderId, parentId, library) } }
+    }
+
+    fun trashLibraryFolder(folderId: String) {
+        viewModelScope.launch {
+            runBusy {
+                val folderIds = descendantFolderIds(folderId) + folderId
+                val noteIds = library.notes.filter { it.folderId in folderIds }.map { it.id }.toSet()
+                openTabs.filter { it.id in noteIds && it.dirty }.forEach { saveNow(it) }
+                noteIds.forEach { saveJobs.remove(it)?.cancel() }
+                library = repository.trashFolder(folderId, library)
+                openTabs.removeAll { it.id in noteIds }
+                if (activeNoteId in noteIds) activeNoteId = null
+                if (currentFolderId in folderIds) currentFolderId = null
+            }
+        }
+    }
+
+    fun restoreLibraryFolder(folderId: String) {
+        viewModelScope.launch { runBusy { library = repository.restoreFolder(folderId, library) } }
+    }
+
+    fun deleteLibraryFolder(folderId: String) {
+        viewModelScope.launch {
+            runBusy {
+                val folderIds = descendantFolderIds(folderId) + folderId
+                val noteIds = library.notes.filter { it.folderId in folderIds }.map { it.id }.toSet()
+                noteIds.forEach { saveJobs.remove(it)?.cancel() }
+                openTabs.removeAll { it.id in noteIds }
+                if (activeNoteId in noteIds) activeNoteId = null
+                library = repository.deleteFolder(folderId, library)
+                if (currentFolderId in folderIds) currentFolderId = null
+            }
+        }
+    }
+
+    fun emptyTrash() {
+        viewModelScope.launch {
+            runBusy {
+                val trashedFolders = library.folders.filter { it.trashedAt != null }.map { it.id }
+                val folderIds = trashedFolders.flatMapTo(mutableSetOf()) { descendantFolderIds(it) + it }
+                val noteIds = library.notes.filter { it.trashedAt != null || it.folderId in folderIds }
+                    .map { it.id }.toSet()
+                noteIds.forEach { saveJobs.remove(it)?.cancel() }
+                openTabs.removeAll { it.id in noteIds }
+                if (activeNoteId in noteIds) activeNoteId = null
+                library = repository.emptyTrash(library)
+            }
+        }
+    }
+
+    fun moveTargetsForFolder(folderId: String): List<FolderRecord> {
+        val forbidden = descendantFolderIds(folderId) + folderId
+        return activeFolders.filter { it.id !in forbidden }
+    }
+
+    private fun descendantFolderIds(folderId: String): Set<String> {
+        val result = mutableSetOf<String>()
+        val pending = ArrayDeque<String>()
+        pending.add(folderId)
+        while (pending.isNotEmpty()) {
+            val parent = pending.removeFirst()
+            library.folders.filter { it.parentId == parent }.forEach { child ->
+                if (result.add(child.id)) pending.add(child.id)
+            }
+        }
+        return result
     }
 
     fun setTool(mode: ToolMode) {

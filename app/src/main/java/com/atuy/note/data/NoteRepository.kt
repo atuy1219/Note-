@@ -112,11 +112,143 @@ class NoteRepository(private val context: Context) {
 
     suspend fun deleteNote(noteId: String, current: LibraryIndex): LibraryIndex = withContext(Dispatchers.IO) {
         ioMutex.withLock {
-            noteFile(noteId).delete()
-            thumbnailFile(noteId).delete()
-            File(pdfCacheDir, "$noteId.pdf").delete()
-            sessionImageDir(noteId).deleteRecursively()
+            deleteNoteFiles(noteId)
             current.copy(notes = current.notes.filterNot { it.id == noteId }).also(::writeLibrary)
+        }
+    }
+
+    suspend fun renameNote(noteId: String, name: String, current: LibraryIndex): LibraryIndex =
+        updateNoteMetadata(noteId, current) { document ->
+            document.copy(
+                title = name.trim().ifBlank { "Untitled" },
+                updatedAt = System.currentTimeMillis(),
+                revision = document.revision + 1,
+            )
+        }
+
+    suspend fun moveNote(noteId: String, folderId: String?, current: LibraryIndex): LibraryIndex =
+        updateNoteMetadata(noteId, current) { document ->
+            document.copy(
+                folderId = folderId,
+                updatedAt = System.currentTimeMillis(),
+                revision = document.revision + 1,
+            )
+        }
+
+    suspend fun trashNote(noteId: String, current: LibraryIndex): LibraryIndex =
+        updateNoteMetadata(noteId, current) { document ->
+            document.copy(
+                trashedAt = System.currentTimeMillis(),
+                updatedAt = System.currentTimeMillis(),
+                revision = document.revision + 1,
+            )
+        }
+
+    suspend fun restoreNote(noteId: String, current: LibraryIndex): LibraryIndex {
+        val summary = current.notes.firstOrNull { it.id == noteId } ?: return current
+        val restoredFolderId = summary.folderId?.takeIf { folderId ->
+            isFolderActive(folderId, current.folders)
+        }
+        return updateNoteMetadata(noteId, current) { document ->
+            document.copy(
+                folderId = restoredFolderId,
+                trashedAt = null,
+                updatedAt = System.currentTimeMillis(),
+                revision = document.revision + 1,
+            )
+        }
+    }
+
+    suspend fun renameFolder(folderId: String, name: String, current: LibraryIndex): LibraryIndex =
+        withContext(Dispatchers.IO) {
+            ioMutex.withLock {
+                val normalized = name.trim().ifBlank { "New folder" }
+                current.copy(
+                    folders = current.folders.map { folder ->
+                        if (folder.id == folderId) {
+                            folder.copy(name = normalized, updatedAt = System.currentTimeMillis())
+                        } else folder
+                    },
+                ).also(::writeLibrary)
+            }
+        }
+
+    suspend fun moveFolder(folderId: String, parentId: String?, current: LibraryIndex): LibraryIndex =
+        withContext(Dispatchers.IO) {
+            ioMutex.withLock {
+                val forbidden = descendantFolderIds(folderId, current.folders) + folderId
+                require(parentId !in forbidden) { "A folder cannot be moved into itself or a descendant" }
+                current.copy(
+                    folders = current.folders.map { folder ->
+                        if (folder.id == folderId) {
+                            folder.copy(parentId = parentId, updatedAt = System.currentTimeMillis())
+                        } else folder
+                    },
+                ).also(::writeLibrary)
+            }
+        }
+
+    suspend fun trashFolder(folderId: String, current: LibraryIndex): LibraryIndex =
+        withContext(Dispatchers.IO) {
+            ioMutex.withLock {
+                current.copy(
+                    folders = current.folders.map { folder ->
+                        if (folder.id == folderId) {
+                            folder.copy(trashedAt = System.currentTimeMillis(), updatedAt = System.currentTimeMillis())
+                        } else folder
+                    },
+                ).also(::writeLibrary)
+            }
+        }
+
+    suspend fun restoreFolder(folderId: String, current: LibraryIndex): LibraryIndex =
+        withContext(Dispatchers.IO) {
+            ioMutex.withLock {
+                val target = current.folders.firstOrNull { it.id == folderId } ?: return@withLock current
+                val restoredParentId = target.parentId?.takeIf { parentId ->
+                    isFolderActive(parentId, current.folders)
+                }
+                current.copy(
+                    folders = current.folders.map { folder ->
+                        if (folder.id == folderId) {
+                            folder.copy(
+                                parentId = restoredParentId,
+                                trashedAt = null,
+                                updatedAt = System.currentTimeMillis(),
+                            )
+                        } else folder
+                    },
+                ).also(::writeLibrary)
+            }
+        }
+
+    suspend fun deleteFolder(folderId: String, current: LibraryIndex): LibraryIndex =
+        withContext(Dispatchers.IO) {
+            ioMutex.withLock {
+                val folderIds = descendantFolderIds(folderId, current.folders) + folderId
+                val noteIds = current.notes.filter { it.folderId in folderIds }.map { it.id }.toSet()
+                noteIds.forEach(::deleteNoteFiles)
+                current.copy(
+                    folders = current.folders.filterNot { it.id in folderIds },
+                    notes = current.notes.filterNot { it.id in noteIds },
+                ).also(::writeLibrary)
+            }
+        }
+
+    suspend fun emptyTrash(current: LibraryIndex): LibraryIndex = withContext(Dispatchers.IO) {
+        ioMutex.withLock {
+            val directlyTrashedFolders = current.folders.filter { it.trashedAt != null }.map { it.id }
+            val folderIds = directlyTrashedFolders.flatMapTo(mutableSetOf()) { rootId ->
+                descendantFolderIds(rootId, current.folders) + rootId
+            }
+            val noteIds = current.notes.filter { note ->
+                note.trashedAt != null || note.folderId in folderIds
+            }.map { it.id }.toSet()
+            noteIds.forEach(::deleteNoteFiles)
+            current.copy(
+                folders = current.folders.filterNot { it.id in folderIds },
+                notes = current.notes.filterNot { it.id in noteIds },
+            ).also(::writeLibrary)
         }
     }
 
@@ -377,6 +509,88 @@ class NoteRepository(private val context: Context) {
         return index.copy(notes = valid).also(::writeLibrary)
     }
 
+    private suspend fun updateNoteMetadata(
+        noteId: String,
+        current: LibraryIndex,
+        transform: (NoteDocument) -> NoteDocument,
+    ): LibraryIndex = withContext(Dispatchers.IO) {
+        ioMutex.withLock {
+            val updated = rewriteManifest(noteId, transform)
+            val summary = summaryFor(updated, thumbnailFile(noteId).takeIf { it.isFile })
+            current.copy(
+                notes = current.notes.filterNot { it.id == noteId } + summary,
+            ).also(::writeLibrary)
+        }
+    }
+
+    private fun rewriteManifest(
+        noteId: String,
+        transform: (NoteDocument) -> NoteDocument,
+    ): NoteDocument {
+        val source = noteFile(noteId)
+        require(source.isFile) { "Notebook not found: $noteId" }
+        val temp = File(source.parentFile, "${source.name}.metadata.tmp")
+        var updatedDocument: NoteDocument? = null
+        ZipInputStream(BufferedInputStream(FileInputStream(source))).use { input ->
+            ZipOutputStream(BufferedOutputStream(FileOutputStream(temp))).use { output ->
+                while (true) {
+                    val entry = input.nextEntry ?: break
+                    val bytes = input.readBytes()
+                    output.putNextEntry(ZipEntry(entry.name).apply { time = entry.time })
+                    if (entry.name == "manifest.json") {
+                        val currentDocument = json.decodeFromString<NoteDocument>(bytes.decodeToString())
+                        val nextDocument = transform(currentDocument)
+                        updatedDocument = nextDocument
+                        output.write(json.encodeToString(nextDocument).toByteArray())
+                    } else {
+                        output.write(bytes)
+                    }
+                    output.closeEntry()
+                    input.closeEntry()
+                }
+            }
+        }
+        val updated = requireNotNull(updatedDocument) { "Invalid .atnote: manifest.json missing" }
+        if (!temp.renameTo(source)) {
+            temp.copyTo(source, overwrite = true)
+            temp.delete()
+        }
+        return updated
+    }
+
+    private fun isFolderActive(folderId: String, folders: List<FolderRecord>): Boolean {
+        val byId = folders.associateBy { it.id }
+        val visited = mutableSetOf<String>()
+        var currentId: String? = folderId
+        while (currentId != null) {
+            if (!visited.add(currentId)) return false
+            val folder = byId[currentId] ?: return false
+            if (folder.trashedAt != null) return false
+            currentId = folder.parentId
+        }
+        return true
+    }
+
+    private fun descendantFolderIds(rootId: String, folders: List<FolderRecord>): Set<String> {
+        val descendants = mutableSetOf<String>()
+        val pending = ArrayDeque<String>()
+        pending.add(rootId)
+        while (pending.isNotEmpty()) {
+            val parent = pending.removeFirst()
+            folders.filter { it.parentId == parent }.forEach { child ->
+                if (descendants.add(child.id)) pending.add(child.id)
+            }
+        }
+        return descendants
+    }
+
+    private fun deleteNoteFiles(noteId: String) {
+        noteFile(noteId).delete()
+        thumbnailFile(noteId).delete()
+        File(pdfCacheDir, "$noteId.pdf").delete()
+        sessionImageDir(noteId).deleteRecursively()
+    }
+
     private fun writeLibrary(index: LibraryIndex) {
         val temp = File(libraryFile.parentFile, "${libraryFile.name}.tmp")
         temp.writeText(json.encodeToString(index))
@@ -519,6 +733,7 @@ class NoteRepository(private val context: Context) {
         id = document.id,
         title = document.title,
         folderId = document.folderId,
+        trashedAt = document.trashedAt,
         updatedAt = document.updatedAt,
         revision = document.revision,
         pageCount = document.pages.size,
