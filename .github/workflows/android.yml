@@ -50,10 +50,3 @@ jobs:
             fi
           done
           exit 1
-
-      - name: Upload APKs
-        uses: actions/upload-artifact@v7
-        with:
-          name: note-ci-apks
-          path: app/build/outputs/apk/**/*.apk
-          if-no-files-found: error
