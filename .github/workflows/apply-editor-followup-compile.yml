@@ -1,0 +1,67 @@
+name: Apply editor follow-up compiler fix
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - synchronize
+
+permissions:
+  contents: write
+
+jobs:
+  fix-build-persist:
+    if: github.head_ref == 'agent/fix-editor-interactions'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: agent/fix-editor-interactions
+          fetch-depth: 0
+
+      - name: Apply compiler fix
+        run: python .github/fix_editor_followup_compile.py
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5.7.0
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK 37
+        run: sdkmanager 'platforms;android-37.0' 'build-tools;37.0.0'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6.2.0
+        with:
+          gradle-version: '9.5.0'
+
+      - name: Build and test
+        run: gradle :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest --stacktrace
+
+      - name: Persist compiler fix
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add app/src/main/java/com/atuy/note/ink/InkPageView.kt
+          git rm .github/fix_editor_followup_compile.py
+          git rm .github/editor-followup-compile-trigger
+          git rm .github/workflows/fix-editor-followup-compile.yml
+          git diff --check
+          git commit -m 'Fix editor follow-up compilation'
+          git push origin HEAD:agent/fix-editor-interactions
+
+      - name: Remove temporary workflow
+        shell: bash
+        run: |
+          git fetch origin main
+          git checkout -B cleanup-main origin/main
+          git rm .github/workflows/apply-editor-followup-compile.yml
+          git commit -m 'Remove temporary editor compiler workflow'
+          git push origin HEAD:main
