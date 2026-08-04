@@ -1,6 +1,5 @@
 name: Nightly APKs
 
-# Manual nightly trigger: 2026-08-03T22:39:00+09:00
 on:
   push:
     branches:
@@ -8,6 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
 
 concurrency:
@@ -18,6 +18,11 @@ jobs:
   build-nightly:
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    env:
+      NOTE_SIGNING_STORE_FILE: ${{ runner.temp }}/note-nightly.keystore
+      NOTE_SIGNING_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+      NOTE_SIGNING_KEY_ALIAS: ${{ secrets.ALIAS }}
+      NOTE_SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
 
     steps:
       - uses: actions/checkout@v7
@@ -39,10 +44,32 @@ jobs:
         with:
           gradle-version: '9.5.0'
 
+      - name: Restore persistent nightly signing key
+        env:
+          SIGNING_KEY_STORE_BASE64: ${{ secrets.SIGNING_KEY_STORE_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$SIGNING_KEY_STORE_BASE64" || -z "$NOTE_SIGNING_STORE_PASSWORD" || \
+                -z "$NOTE_SIGNING_KEY_ALIAS" || -z "$NOTE_SIGNING_KEY_PASSWORD" ]]; then
+            echo 'Missing one or more signing secrets: SIGNING_KEY_STORE_BASE64, KEY_STORE_PASSWORD, ALIAS, KEY_PASSWORD.' >&2
+            exit 1
+          fi
+
+          printf '%s' "$SIGNING_KEY_STORE_BASE64" | base64 --decode > "$NOTE_SIGNING_STORE_FILE"
+          chmod 600 "$NOTE_SIGNING_STORE_FILE"
+          test -s "$NOTE_SIGNING_STORE_FILE"
+          keytool -list \
+            -keystore "$NOTE_SIGNING_STORE_FILE" \
+            -storepass "$NOTE_SIGNING_STORE_PASSWORD" \
+            -alias "$NOTE_SIGNING_KEY_ALIAS" >/dev/null
+
       - name: Build debug and release
         id: version
         shell: bash
         run: |
+          set -euo pipefail
           SHORT_SHA="${GITHUB_SHA::7}"
           VERSION_CODE="$(date -u +%s)"
           VERSION_NAME="0.7.0-nightly+${SHORT_SHA}"
@@ -53,62 +80,86 @@ jobs:
             -PnightlyVersionName="$VERSION_NAME" \
             --stacktrace
 
-      - name: Sign and collect APKs
+      - name: Collect and verify APKs
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p dist
           APKSIGNER="$ANDROID_HOME/build-tools/37.0.0/apksigner"
           test -x "$APKSIGNER"
 
-          keytool -genkeypair -v \
-            -keystore nightly.keystore \
-            -storepass android \
-            -alias nightly \
-            -keypass android \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname "CN=Note Nightly, O=atuy1219, C=JP"
-
+          expected_digest=''
           while IFS= read -r apk; do
-            base="$(basename "$apk")"
-            output="dist/${base/-unsigned/}"
-            "$APKSIGNER" sign \
-              --ks nightly.keystore \
-              --ks-pass pass:android \
-              --key-pass pass:android \
-              --out "$output" \
-              "$apk"
+            output="dist/$(basename "$apk")"
+            cp "$apk" "$output"
             "$APKSIGNER" verify "$output"
-          done < <(find app/build/outputs/apk/release -name '*-unsigned.apk' -type f | sort)
 
-          while IFS= read -r apk; do
-            cp "$apk" "dist/$(basename "$apk")"
-          done < <(find app/build/outputs/apk/debug -name '*.apk' -type f | sort)
+            certificate_digest="$(
+              "$APKSIGNER" verify --print-certs "$output" |
+                sed -n 's/^Signer #1 certificate SHA-256 digest: //p' |
+                head -n 1
+            )"
+            test -n "$certificate_digest"
+
+            if [[ -z "$expected_digest" ]]; then
+              expected_digest="$certificate_digest"
+            elif [[ "$certificate_digest" != "$expected_digest" ]]; then
+              echo "APK signing certificate mismatch: $output" >&2
+              exit 1
+            fi
+          done < <(
+            find app/build/outputs/apk/debug app/build/outputs/apk/release \
+              -name '*.apk' ! -name '*-unsigned.apk' -type f | sort
+          )
 
           test -n "$(find dist -name '*.apk' -print -quit)"
           sha256sum dist/*.apk > dist/SHA256SUMS.txt
 
-      - name: Upload nightly artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: note-nightly-${{ steps.version.outputs.short_sha }}
-          path: dist/*
-          if-no-files-found: error
-
-      - name: Publish prerelease
+      - name: Remove previous nightly artifacts
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: nightly-${{ steps.version.outputs.short_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r artifact_id; do
+            [[ -z "$artifact_id" ]] && continue
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"
+          done < <(
+            gh api --paginate "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" \
+              --jq '.artifacts[] | select(.name == "note-nightly-latest" or (.name | startswith("note-nightly-"))) | .id'
+          )
+
+      - name: Upload latest nightly artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: note-nightly-latest
+          path: dist/*
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 1
+
+      - name: Publish latest nightly prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
           VERSION_NAME: ${{ steps.version.outputs.version_name }}
         shell: bash
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" dist/* --clobber
-          else
-            gh release create "$TAG" dist/* \
-              --target "$GITHUB_SHA" \
-              --title "Note $VERSION_NAME" \
-              --notes "Automated debug and R8-minified release APKs for commit $GITHUB_SHA." \
-              --prerelease
+          set -euo pipefail
+
+          while IFS= read -r old_tag; do
+            [[ -z "$old_tag" ]] && continue
+            gh release delete "$old_tag" --cleanup-tag --yes
+          done < <(
+            gh release list --limit 1000 --json tagName \
+              --jq '.[].tagName | select(startswith("nightly-"))'
+          )
+
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release delete nightly --cleanup-tag --yes
           fi
+
+          gh release create nightly dist/* \
+            --target "$GITHUB_SHA" \
+            --title "Note $VERSION_NAME" \
+            --notes "Latest automated nightly APKs for commit $GITHUB_SHA. All APKs use the persistent nightly signing certificate and can update the preceding nightly installation." \
+            --prerelease
