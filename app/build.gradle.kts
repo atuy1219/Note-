@@ -92,7 +92,7 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
-    val inkVersion = "1.1.0-alpha06"
+    val inkVersion = "1.1.0-alpha07"
     implementation("androidx.ink:ink-nativeloader:$inkVersion")
     implementation("androidx.ink:ink-authoring:$inkVersion")
     implementation("androidx.ink:ink-brush:$inkVersion")
