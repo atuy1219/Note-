@@ -41,7 +41,7 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v6.3.0
         with:
-          gradle-version: '9.5.0'
+          gradle-version: '9.6.0'
 
       - name: Restore persistent nightly signing key
         env:
