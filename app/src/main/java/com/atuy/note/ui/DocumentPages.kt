@@ -121,6 +121,7 @@ internal fun DocumentPages(
         val pageWidthPx = with(density) { pageWidth.toPx() }
         val baseWidthPx = with(density) { baseWidth.toPx() }
         val viewportCross = with(density) { if (vertical) maxWidth.toPx() else maxHeight.toPx() }
+        val viewportCenter = Offset(with(density) { maxWidth.toPx() } / 2f, with(density) { maxHeight.toPx() } / 2f)
         val gapPx = with(density) { DOCUMENT_PAGE_GAP.toPx() }
         val tallestRatio = session.pages.maxOf { it.height / it.width }
         fun crossContentSize(width: Float): Float = maxOf(
@@ -254,7 +255,7 @@ internal fun DocumentPages(
                     onClick = {
                         startCallback()
                         transformCallback(
-                            Offset(with(density) { maxWidth.toPx() } / 2f, with(density) { maxHeight.toPx() } / 2f),
+                            viewportCenter,
                             Offset.Zero, 1f / zoom,
                         )
                     },
