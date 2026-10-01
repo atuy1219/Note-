@@ -564,12 +564,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun addStroke(page: PageSession, runtime: RuntimeStroke) {
         page.add(runtime)
-        markDirty()
+        markDirty(page)
     }
 
     fun beginErase(page: PageSession) { page.beginEraseGesture() }
     fun eraseAt(page: PageSession, x: Float, y: Float, radius: Float) { page.eraseAt(x, y, radius) }
-    fun endErase(page: PageSession) { if (page.endEraseGesture()) markDirty() }
+    fun endErase(page: PageSession) { if (page.endEraseGesture()) markDirty(page) }
 
     fun selectWithLasso(page: PageSession, lasso: Stroke) {
         val count = page.selectWithLasso(lasso.inputs, lassoCoverageMode)
@@ -580,13 +580,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!page.consumeStrokeForLasso(strokeId)) return
         val count = page.selectWithLasso(lasso.inputs, lassoCoverageMode)
         toolMode = ToolMode.LASSO
-        markDirty()
+        markDirty(page)
         statusMessage = if (count == 0) "囲みを投げ縄に変換しました（選択なし）" else "$count 本の線を選択"
     }
 
     fun beginSelectedStrokeTransform(page: PageSession): Boolean = page.beginSelectedStrokeTransform()
     fun moveSelectedStrokes(page: PageSession, dx: Float, dy: Float) { page.transformSelectedStrokes(dx, dy) }
-    fun endSelectedStrokeTransform(page: PageSession) { if (page.endSelectedStrokeTransform()) markDirty() }
+    fun endSelectedStrokeTransform(page: PageSession) { if (page.endSelectedStrokeTransform()) markDirty(page) }
     fun cancelSelectedStrokeTransform(page: PageSession) { page.cancelSelectedStrokeTransform() }
 
     fun scaleSelectedStrokes(factor: Float) {
@@ -640,7 +640,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun beginImageTransform(page: PageSession, imageId: String): Boolean = page.beginImageTransform(imageId)
     fun moveImage(page: PageSession, imageId: String, x: Float, y: Float) { page.moveImage(imageId, x, y) }
-    fun endImageTransform(page: PageSession) { if (page.endImageTransform()) markDirty() }
+    fun endImageTransform(page: PageSession) { if (page.endImageTransform()) markDirty(page) }
     fun cancelImageTransform(page: PageSession) { page.cancelImageTransform() }
 
     fun scaleSelectedImage(factor: Float) {
@@ -706,6 +706,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun markDirty() { activeSession?.let(::markDirty) }
+
+    private fun markDirty(page: PageSession) {
+        openTabs.firstOrNull { session -> session.pages.any { it === page } }?.let(::markDirty)
+    }
 
     private fun markDirty(session: NoteSession) {
         session.markEdited()

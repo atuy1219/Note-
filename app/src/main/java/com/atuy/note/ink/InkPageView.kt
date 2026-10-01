@@ -596,7 +596,9 @@ class InkPageView(context: Context) : FrameLayout(context) {
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
-                if (currentPage.isPointInsideStrokeSelection(point.x, point.y) && onSelectedTransformStart()) {
+                if (currentPage.isPointInsideStrokeSelection(point.x, point.y, screenDistanceToWorld(18f)) &&
+                    onSelectedTransformStart()
+                ) {
                     selectedDragActive = true
                     selectedDragMoved = false
                     selectedDragStartX = point.x

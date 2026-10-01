@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -26,6 +27,10 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -47,6 +52,8 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
@@ -57,6 +64,7 @@ import com.atuy.note.data.ScrollAxis
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 @Composable
 internal fun DocumentPages(
@@ -237,6 +245,25 @@ internal fun DocumentPages(
                     }
                 }
             }
+            Surface(
+                modifier = Modifier.align(Alignment.BottomEnd).padding(10.dp),
+                shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+            ) {
+                TextButton(
+                    onClick = {
+                        startCallback()
+                        transformCallback(
+                            Offset(with(density) { maxWidth.toPx() } / 2f, with(density) { maxHeight.toPx() } / 2f),
+                            Offset.Zero, 1f / zoom,
+                        )
+                    },
+                    enabled = !blockedProvider(),
+                    modifier = Modifier.semantics { contentDescription = "拡大率。タップして100%に戻す" },
+                ) {
+                    Text("${(zoom * 100).roundToInt()}%")
+                }
+            }
         }
     }
 }
@@ -287,6 +314,11 @@ private fun Modifier.documentNavigationGesture(
                 }
             }
             val pressed = event.changes.any { it.pressed }
+            if (!pressed && pastSlop && !stylusSeen && !pinched) {
+                event.changes.firstOrNull { it.previousPressed }?.let {
+                    tracker.addPosition(it.uptimeMillis, it.position)
+                }
+            }
         } while (pressed)
         if (pastSlop && !pinched && !stylusSeen) {
             onFinish(tracker.calculateVelocity())

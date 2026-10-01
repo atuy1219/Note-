@@ -1231,6 +1231,7 @@ private fun EditorCommandBar(
         Icons.Default.Brush,
         "ペン",
         penSelected,
+        enabled = !readOnly,
     ) {
         if (!readOnly) {
             if (penSelected) {
@@ -1250,6 +1251,7 @@ private fun EditorCommandBar(
         EraserIcon,
         "消しゴム",
         eraserSelected,
+        enabled = !readOnly,
     ) {
         if (!readOnly) {
             if (eraserSelected) {
@@ -1264,20 +1266,30 @@ private fun EditorCommandBar(
         Icons.Default.Gesture,
         "投げ縄",
         !readOnly && viewModel.toolMode == ToolMode.LASSO,
+        enabled = !readOnly,
     ) {
         if (!readOnly) {
-            viewModel.setTool(ToolMode.LASSO)
-            onPanel(EditorPanel.LASSO)
+            if (viewModel.toolMode == ToolMode.LASSO) {
+                onPanel(EditorPanel.LASSO)
+            } else {
+                viewModel.setTool(ToolMode.LASSO)
+                onDismissPanel()
+            }
         }
     }
     val image = CommandSpec(
         Icons.Default.Image,
         "画像",
         !readOnly && viewModel.toolMode == ToolMode.IMAGE,
+        enabled = !readOnly,
     ) {
         if (!readOnly) {
-            viewModel.setTool(ToolMode.IMAGE)
-            onPanel(EditorPanel.IMAGE)
+            if (viewModel.toolMode == ToolMode.IMAGE) {
+                onPanel(EditorPanel.IMAGE)
+            } else {
+                viewModel.setTool(ToolMode.IMAGE)
+                onDismissPanel()
+            }
         }
     }
     val readOnlyCommand = CommandSpec(Icons.Default.Visibility, "閲覧専用", readOnly, onClick = onToggleReadOnly)
