@@ -11,6 +11,7 @@ import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
+import androidx.ink.storage.StrokeInputBatchSerialization
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -328,17 +329,16 @@ class NoteRepository(private val context: Context) {
         }
     }
 
-    suspend fun saveSession(session: NoteSession, current: LibraryIndex): LibraryIndex = withContext(Dispatchers.IO) {
+    suspend fun saveSnapshot(snapshot: NoteSaveSnapshot, current: LibraryIndex): LibraryIndex = withContext(Dispatchers.IO) {
         ioMutex.withLock {
-            val document = session.toDocument(nextRevision = true)
-            val inkEntries = session.encodedInkEntries()
-            writeArchive(session.archiveFile, document, session.sourcePdfFile, session.imageFiles, inkEntries)
-            session.revision = document.revision
-            session.updatedAt = document.updatedAt
-            session.dirty = false
-            val thumb = renderThumbnail(document, session.sourcePdfFile, session.imageFiles, inkEntries)
+            val document = snapshot.document
+            val inkEntries = snapshot.strokes.associate { runtime ->
+                runtime.stored.inkEntry to StrokeInputBatchSerialization.encode(runtime.stroke.inputs)
+            }
+            writeArchive(snapshot.archiveFile, document, snapshot.sourcePdfFile, snapshot.imageFiles, inkEntries)
+            val thumb = renderThumbnail(document, snapshot.sourcePdfFile, snapshot.imageFiles, inkEntries)
             val summary = summaryFor(document, thumb)
-            current.copy(notes = current.notes.filterNot { it.id == session.id } + summary).also(::writeLibrary)
+            current.copy(notes = current.notes.filterNot { it.id == document.id } + summary).also(::writeLibrary)
         }
     }
 
@@ -551,10 +551,7 @@ class NoteRepository(private val context: Context) {
             }
         }
         val updated = requireNotNull(updatedDocument) { "Invalid .atnote: manifest.json missing" }
-        if (!temp.renameTo(source)) {
-            temp.copyTo(source, overwrite = true)
-            temp.delete()
-        }
+        check(temp.renameTo(source)) { "Could not replace notebook metadata; original file retained" }
         return updated
     }
 
@@ -594,10 +591,7 @@ class NoteRepository(private val context: Context) {
     private fun writeLibrary(index: LibraryIndex) {
         val temp = File(libraryFile.parentFile, "${libraryFile.name}.tmp")
         temp.writeText(json.encodeToString(index))
-        if (!temp.renameTo(libraryFile)) {
-            temp.copyTo(libraryFile, overwrite = true)
-            temp.delete()
-        }
+        check(temp.renameTo(libraryFile)) { "Could not replace library index; original file retained" }
     }
 
     private fun writeArchive(
@@ -612,35 +606,32 @@ class NoteRepository(private val context: Context) {
             zip.putNextEntry(ZipEntry("manifest.json"))
             zip.write(json.encodeToString(document).toByteArray())
             zip.closeEntry()
-            if (pdfFile?.isFile == true) {
+            if (document.sourcePdfEntry != null) {
+                require(pdfFile?.isFile == true) { "Notebook PDF is missing" }
                 zip.putNextEntry(ZipEntry("background/source.pdf"))
                 FileInputStream(pdfFile).use { it.copyTo(zip) }
                 zip.closeEntry()
             }
             val referencedImages = document.pages.flatMap { it.images }.map { it.entryName }.distinct()
             referencedImages.forEach { entryName ->
-                val imageFile = imageFiles[entryName]
-                if (imageFile?.isFile == true) {
-                    zip.putNextEntry(ZipEntry(entryName))
-                    FileInputStream(imageFile).use { it.copyTo(zip) }
-                    zip.closeEntry()
-                }
+                val imageFile = requireNotNull(imageFiles[entryName]) { "Notebook image is missing: $entryName" }
+                require(imageFile.isFile) { "Notebook image is missing: $entryName" }
+                zip.putNextEntry(ZipEntry(entryName))
+                FileInputStream(imageFile).use { it.copyTo(zip) }
+                zip.closeEntry()
             }
             val referencedInk = document.pages.flatMap { it.strokes }
                 .map { it.inkEntry }
                 .filter { it.isNotBlank() }
                 .distinct()
             referencedInk.forEach { entryName ->
-                val encoded = inkEntries[entryName] ?: return@forEach
+                val encoded = requireNotNull(inkEntries[entryName]) { "Notebook stroke is missing: $entryName" }
                 zip.putNextEntry(ZipEntry(entryName))
                 zip.write(encoded)
                 zip.closeEntry()
             }
         }
-        if (!temp.renameTo(target)) {
-            temp.copyTo(target, overwrite = true)
-            temp.delete()
-        }
+        check(temp.renameTo(target)) { "Could not replace notebook; original file retained" }
     }
 
     private fun renderThumbnail(

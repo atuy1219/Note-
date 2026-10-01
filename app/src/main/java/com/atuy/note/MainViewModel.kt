@@ -27,6 +27,7 @@ import com.atuy.note.data.RuntimeStroke
 import com.atuy.note.data.ScrollAxis
 import com.atuy.note.data.ToolMode
 import com.atuy.note.sync.DriveSyncManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -251,14 +252,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeTab(noteId: String) {
         viewModelScope.launch {
-            val index = openTabs.indexOfFirst { it.id == noteId }
-            if (index < 0) return@launch
-            val session = openTabs[index]
-            if (session.dirty) saveNow(session)
-            // Do not recycle UI-visible bitmaps here. The outgoing AndroidView or a
-            // hardware display list can still reference them for one or more frames.
-            openTabs.removeAt(index)
-            if (activeNoteId == noteId) activeNoteId = openTabs.getOrNull((index - 1).coerceAtLeast(0))?.id
+            runBusy {
+                val session = openTabs.firstOrNull { it.id == noteId } ?: return@runBusy
+                while (session.dirty) saveNow(session)
+                // Outgoing views can reference bitmaps for one or more frames.
+                val index = openTabs.indexOfFirst { it.id == noteId }
+                if (index < 0) return@runBusy
+                openTabs.removeAt(index)
+                if (activeNoteId == noteId) activeNoteId = openTabs.getOrNull((index - 1).coerceAtLeast(0))?.id
+            }
         }
     }
 
@@ -649,7 +651,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun redo() { if (activePage?.redo() == true) markDirty() }
 
     fun saveActive() {
-        activeSession?.let { session -> viewModelScope.launch { saveNow(session) } }
+        activeSession?.let { session -> viewModelScope.launch { runBusy { saveNow(session) } } }
     }
 
     suspend fun renderPdfPage(session: NoteSession, page: PageSession, targetWidth: Int): Bitmap? =
@@ -693,25 +695,43 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun markDirty() { activeSession?.let(::markDirty) }
 
     private fun markDirty(session: NoteSession) {
-        session.dirty = true
+        session.markEdited()
         saveJobs.remove(session.id)?.cancel()
         saveJobs[session.id] = viewModelScope.launch {
             delay(900)
-            saveNow(session)
+            // Only debounce jobs are cancelled by subsequent edits. A running save
+            // must finish so its revision is acknowledged before the next save.
+            saveJobs.remove(session.id)
+            try {
+                saveNow(session)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                statusMessage = error.message ?: "Could not save notebook"
+            }
         }
     }
 
     private suspend fun saveNow(session: NoteSession) {
         saveMutex.withLock {
             if (!session.dirty) return
-            library = repository.saveSession(session, library)
+            val snapshot = session.captureSaveSnapshot()
+            library = repository.saveSnapshot(snapshot, library)
+            session.completeSave(snapshot)
         }
     }
 
     private suspend fun runBusy(block: suspend () -> Unit) {
         busy = true
-        runCatching { block() }.onFailure { statusMessage = it.message ?: it.javaClass.simpleName }
-        busy = false
+        try {
+            block()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            statusMessage = error.message ?: error.javaClass.simpleName
+        } finally {
+            busy = false
+        }
     }
 
     private inline fun <reified T : Enum<T>> enumPreference(key: String, fallback: T): T =
