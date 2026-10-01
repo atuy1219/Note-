@@ -189,8 +189,10 @@ class PageSession(
     var contentVersion by mutableIntStateOf(0)
         private set
 
-    private val undoStack = ArrayDeque<InkOperation>()
-    private val redoStack = ArrayDeque<InkOperation>()
+    private val undoStack = mutableStateListOf<InkOperation>()
+    private val redoStack = mutableStateListOf<InkOperation>()
+    val canUndo: Boolean get() = undoStack.isNotEmpty()
+    val canRedo: Boolean get() = redoStack.isNotEmpty()
     private var eraseGestureBefore: List<RuntimeStroke>? = null
     private var imageTransformBefore: PageImage? = null
     private var selectedStrokeTransformBefore: List<RuntimeStroke>? = null
@@ -209,7 +211,7 @@ class PageSession(
         clearStrokeSelection()
         contentVersion++
         if (recordHistory) {
-            undoStack.addLast(InkOperation.AddStroke(runtime))
+            undoStack.add(InkOperation.AddStroke(runtime))
             redoStack.clear()
         }
     }
@@ -263,7 +265,7 @@ class PageSession(
         eraseGestureBefore = null
         val after = strokes.toList()
         if (sameStrokeSequence(before, after)) return false
-        undoStack.addLast(InkOperation.ReplaceStrokes(before, after))
+        undoStack.add(InkOperation.ReplaceStrokes(before, after))
         redoStack.clear()
         return true
     }
@@ -343,7 +345,7 @@ class PageSession(
         selectedStrokeTransformBefore = null
         val after = strokes.toList()
         if (sameStrokeSequence(before, after)) return false
-        undoStack.addLast(InkOperation.ReplaceStrokes(before, after))
+        undoStack.add(InkOperation.ReplaceStrokes(before, after))
         redoStack.clear()
         return true
     }
@@ -368,7 +370,7 @@ class PageSession(
         }
         if (sameStrokeSequence(before, after)) return false
         replaceAllStrokes(after, preserveSelection = true)
-        undoStack.addLast(InkOperation.ReplaceStrokes(before, after))
+        undoStack.add(InkOperation.ReplaceStrokes(before, after))
         redoStack.clear()
         return true
     }
@@ -399,7 +401,7 @@ class PageSession(
         }
         if (sameStrokeSequence(before, after) && before.map { it.stored.brush } == after.map { it.stored.brush }) return false
         replaceAllStrokes(after, preserveSelection = true)
-        undoStack.addLast(InkOperation.ReplaceStrokes(before, after))
+        undoStack.add(InkOperation.ReplaceStrokes(before, after))
         redoStack.clear()
         return true
     }
@@ -411,7 +413,7 @@ class PageSession(
         val after = before.filterNot { it.stored.id in ids }
         if (before.size == after.size) return false
         replaceAllStrokes(after)
-        undoStack.addLast(InkOperation.ReplaceStrokes(before, after))
+        undoStack.add(InkOperation.ReplaceStrokes(before, after))
         redoStack.clear()
         return true
     }
@@ -421,7 +423,7 @@ class PageSession(
         contentVersion++
         selectedImageId = image.id
         clearStrokeSelection()
-        undoStack.addLast(InkOperation.AddImage(image))
+        undoStack.add(InkOperation.AddImage(image))
         redoStack.clear()
     }
 
@@ -432,7 +434,7 @@ class PageSession(
         val removed = images.removeAt(index)
         contentVersion++
         selectedImageId = null
-        undoStack.addLast(InkOperation.RemoveImage(index, removed))
+        undoStack.add(InkOperation.RemoveImage(index, removed))
         redoStack.clear()
         return removed
     }
@@ -455,7 +457,7 @@ class PageSession(
         if (before == after) return false
         images[index] = after
         contentVersion++
-        undoStack.addLast(InkOperation.TransformImage(before, after))
+        undoStack.add(InkOperation.TransformImage(before, after))
         redoStack.clear()
         return true
     }
@@ -491,7 +493,7 @@ class PageSession(
         imageTransformBefore = null
         val after = images.firstOrNull { it.id == before.id } ?: return false
         if (before == after) return false
-        undoStack.addLast(InkOperation.TransformImage(before, after))
+        undoStack.add(InkOperation.TransformImage(before, after))
         redoStack.clear()
         return true
     }
@@ -515,7 +517,7 @@ class PageSession(
             is InkOperation.TransformImage -> replaceImage(op.before)
         }
         contentVersion++
-        redoStack.addLast(op)
+        redoStack.add(op)
         return true
     }
 
@@ -532,7 +534,7 @@ class PageSession(
             is InkOperation.TransformImage -> replaceImage(op.after)
         }
         contentVersion++
-        undoStack.addLast(op)
+        undoStack.add(op)
         return true
     }
 
@@ -609,8 +611,14 @@ class NoteSession(
     var dirty by mutableStateOf(false)
     private var editGeneration = 0L
     var activePageIndex by mutableIntStateOf(0)
+    var pageNavigationVersion by mutableIntStateOf(0)
+        private set
     val pages = mutableStateListOf<PageSession>().apply {
         addAll(document.pages.map { PageSession(it, inkEntries) })
+    }
+
+    fun requestPageNavigation() {
+        pageNavigationVersion++
     }
 
     fun markEdited() {

@@ -7,9 +7,6 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -28,7 +25,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
@@ -89,7 +86,6 @@ import androidx.compose.material.icons.filled.RestoreFromTrash
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
@@ -120,13 +116,16 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -138,10 +137,8 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.PointerType
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -160,6 +157,7 @@ import com.atuy.note.data.PageSession
 import com.atuy.note.data.ScrollAxis
 import com.atuy.note.data.ToolMode
 import com.atuy.note.ink.InkPageView
+import kotlinx.coroutines.delay
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -173,6 +171,13 @@ fun EnhancedNoteApp(
     onSyncDrive: () -> Unit,
 ) {
     val snackbar = remember { SnackbarHostState() }
+    val editorStates = rememberSaveableStateHolder()
+    var retainedNoteIds by remember { mutableStateOf(emptySet<String>()) }
+    val openNoteIds = viewModel.openTabs.map { it.id }.toSet()
+    LaunchedEffect(openNoteIds) {
+        (retainedNoteIds - openNoteIds).forEach(editorStates::removeState)
+        retainedNoteIds = openNoteIds
+    }
     var showHomeSettings by rememberSaveable { mutableStateOf(false) }
     val message = viewModel.statusMessage
 
@@ -187,18 +192,22 @@ fun EnhancedNoteApp(
         showHomeSettings = false
     }
 
-    Box(Modifier.fillMaxSize().statusBarsPadding()) {
+    Box(Modifier.fillMaxSize().safeDrawingPadding()) {
         AppFrame(
             viewModel = viewModel,
             uiPreferences = uiPreferences,
         ) {
             when {
-                viewModel.activeSession != null -> EditorWorkspace(
-                    viewModel = viewModel,
-                    uiPreferences = uiPreferences,
-                    onImportImage = onImportImage,
-                    snackbar = snackbar,
-                )
+                viewModel.activeSession != null -> editorStates.SaveableStateProvider(
+                    key = viewModel.activeSession!!.id,
+                ) {
+                    EditorWorkspace(
+                        viewModel = viewModel,
+                        uiPreferences = uiPreferences,
+                        onImportImage = onImportImage,
+                        snackbar = snackbar,
+                    )
+                }
                 showHomeSettings -> HomeSettingsScreen(
                     viewModel = viewModel,
                     uiPreferences = uiPreferences,
@@ -1071,9 +1080,10 @@ private fun EditorWorkspace(
     }
 
     val body: @Composable () -> Unit = {
-        Box(Modifier.fillMaxSize()) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val inlinePages = maxWidth >= 700.dp
             Row(Modifier.fillMaxSize()) {
-                if (showPages) {
+                if (showPages && inlinePages) {
                     PageRail(
                         viewModel = viewModel,
                         session = session,
@@ -1086,6 +1096,23 @@ private fun EditorWorkspace(
                     session = session,
                     readOnly = readOnly,
                     modifier = Modifier.weight(1f),
+                )
+            }
+
+            if (showPages && !inlinePages) {
+                Box(
+                    Modifier.fillMaxSize().background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.32f))
+                        .clickable { showPages = false },
+                )
+                PageRail(
+                    viewModel = viewModel,
+                    session = session,
+                    onClose = { showPages = false },
+                    onSelectPage = { index ->
+                        viewModel.activatePage(index)
+                        showPages = false
+                    },
+                    modifier = Modifier.width((maxWidth - 40.dp).coerceIn(1.dp, 300.dp)).fillMaxHeight(),
                 )
             }
 
@@ -1180,15 +1207,23 @@ private fun EditorCommandBar(
     val details = CommandSpec(Icons.Default.MoreHoriz, "詳細", activePanel == EditorPanel.DETAILS) {
         onPanel(EditorPanel.DETAILS)
     }
-    val share = CommandSpec(Icons.Default.Share, "共有", false) {
-        viewModel.saveActive()
-        viewModel.reportStatus("ノートを保存しました")
-    }
+    val save = CommandSpec(Icons.Default.Save, "保存", false, onClick = viewModel::saveActive)
+    val undo = CommandSpec(
+        Icons.AutoMirrored.Filled.Undo, "元に戻す", false,
+        enabled = !readOnly && viewModel.activePage?.canUndo == true,
+        onClick = viewModel::undo,
+    )
+    val redo = CommandSpec(
+        Icons.AutoMirrored.Filled.Redo, "やり直す", false,
+        enabled = !readOnly && viewModel.activePage?.canRedo == true,
+        onClick = viewModel::redo,
+    )
     val addPage = CommandSpec(
         Icons.AutoMirrored.Filled.NoteAdd,
         "ページ追加",
         false,
-        viewModel::addPage,
+        enabled = !readOnly,
+        onClick = viewModel::addPage,
     )
     val penSelected = !readOnly && viewModel.toolMode == ToolMode.PEN &&
         viewModel.brushSpec.kind != BrushKind.HIGHLIGHTER
@@ -1196,6 +1231,7 @@ private fun EditorCommandBar(
         Icons.Default.Brush,
         "ペン",
         penSelected,
+        enabled = !readOnly,
     ) {
         if (!readOnly) {
             if (penSelected) {
@@ -1215,6 +1251,7 @@ private fun EditorCommandBar(
         EraserIcon,
         "消しゴム",
         eraserSelected,
+        enabled = !readOnly,
     ) {
         if (!readOnly) {
             if (eraserSelected) {
@@ -1225,61 +1262,43 @@ private fun EditorCommandBar(
             }
         }
     }
-    val text = CommandSpec(Icons.Default.TextFields, "テキスト", activePanel == EditorPanel.TEXT) {
-        onPanel(EditorPanel.TEXT)
-    }
-    val sticker = CommandSpec(
-        Icons.Default.EmojiEmotions,
-        "ステッカー",
-        activePanel == EditorPanel.STICKER,
-    ) { onPanel(EditorPanel.STICKER) }
     val lasso = CommandSpec(
         Icons.Default.Gesture,
         "投げ縄",
         !readOnly && viewModel.toolMode == ToolMode.LASSO,
+        enabled = !readOnly,
     ) {
         if (!readOnly) {
-            viewModel.setTool(ToolMode.LASSO)
-            onPanel(EditorPanel.LASSO)
+            if (viewModel.toolMode == ToolMode.LASSO) {
+                onPanel(EditorPanel.LASSO)
+            } else {
+                viewModel.setTool(ToolMode.LASSO)
+                onDismissPanel()
+            }
         }
     }
     val image = CommandSpec(
         Icons.Default.Image,
         "画像",
         !readOnly && viewModel.toolMode == ToolMode.IMAGE,
+        enabled = !readOnly,
     ) {
         if (!readOnly) {
-            viewModel.setTool(ToolMode.IMAGE)
-            onPanel(EditorPanel.IMAGE)
+            if (viewModel.toolMode == ToolMode.IMAGE) {
+                onPanel(EditorPanel.IMAGE)
+            } else {
+                viewModel.setTool(ToolMode.IMAGE)
+                onDismissPanel()
+            }
         }
     }
-    val shape = CommandSpec(Icons.Default.Category, "シェイプ", activePanel == EditorPanel.SHAPE) {
-        onPanel(EditorPanel.SHAPE)
-    }
-    val sticky = CommandSpec(
-        Icons.AutoMirrored.Filled.StickyNote2,
-        "付箋",
-        activePanel == EditorPanel.STICKY,
-    ) { onPanel(EditorPanel.STICKY) }
-    val pointer = CommandSpec(Icons.Default.NearMe, "ポインタ", activePanel == EditorPanel.POINTER) {
-        onPanel(EditorPanel.POINTER)
-    }
-    val voice = CommandSpec(Icons.Default.Mic, "音声", activePanel == EditorPanel.VOICE) {
-        onPanel(EditorPanel.VOICE)
-    }
-    val readOnlyCommand = CommandSpec(Icons.Default.Visibility, "閲覧専用", readOnly, onToggleReadOnly)
-    val ai = CommandSpec(Icons.Default.AutoAwesome, "AI", activePanel == EditorPanel.AI) {
-        onPanel(EditorPanel.AI)
-    }
-    val search = CommandSpec(Icons.Default.Search, "検索", activePanel == EditorPanel.SEARCH) {
-        onPanel(EditorPanel.SEARCH)
-    }
-    val pages = CommandSpec(Icons.Default.Menu, "ページ一覧", showPages, onTogglePages)
+    val readOnlyCommand = CommandSpec(Icons.Default.Visibility, "閲覧専用", readOnly, onClick = onToggleReadOnly)
+    val pages = CommandSpec(Icons.Default.Menu, "ページ一覧", showPages, onClick = onTogglePages)
 
-    val detailBlock = listOf(addPage, share, details)
-    val toolsBeforeLasso = listOf(pen, eraser, text, sticker)
-    val toolsAfterLasso = listOf(image, shape, sticky, pointer, voice)
-    val pageBlock = listOf(pages, search, ai, readOnlyCommand)
+    val detailBlock = listOf(undo, redo, addPage, save, details)
+    val toolsBeforeLasso = listOf(pen, eraser)
+    val toolsAfterLasso = listOf(image)
+    val pageBlock = listOf(pages, readOnlyCommand)
 
     Surface(
         color = MaterialTheme.colorScheme.surfaceContainerHigh,
@@ -1391,6 +1410,7 @@ private data class CommandSpec(
     val icon: ImageVector,
     val description: String,
     val selected: Boolean,
+    val enabled: Boolean = true,
     val onClick: () -> Unit,
 )
 
@@ -1430,7 +1450,7 @@ private fun CommandButton(
             Color.Transparent
         },
     ) {
-        IconButton(onClick = spec.onClick) {
+        IconButton(onClick = spec.onClick, enabled = spec.enabled) {
             Icon(spec.icon, spec.description)
         }
     }
@@ -1835,9 +1855,11 @@ private fun PageRail(
     viewModel: MainViewModel,
     session: NoteSession,
     onClose: () -> Unit,
+    onSelectPage: (Int) -> Unit = { viewModel.activatePage(it) },
+    modifier: Modifier = Modifier.width(300.dp).fillMaxHeight(),
 ) {
     Surface(
-        modifier = Modifier.width(300.dp).fillMaxHeight(),
+        modifier = modifier,
         color = MaterialTheme.colorScheme.surfaceContainer,
         tonalElevation = 2.dp,
     ) {
@@ -1877,7 +1899,7 @@ private fun PageRail(
                     }
                     Column {
                         Card(
-                            onClick = { viewModel.activatePage(index) },
+                            onClick = { onSelectPage(index) },
                             border = if (index == session.activePageIndex) {
                                 BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
                             } else {
@@ -2100,128 +2122,29 @@ private fun SharedZoomPages(
     readOnly: Boolean,
     modifier: Modifier,
 ) {
-    var zoom by rememberSaveable(session.id) { mutableFloatStateOf(1f) }
-    val zoomModifier = Modifier.sharedPageZoomGesture { factor ->
-        zoom = (zoom * factor).coerceIn(0.55f, 3f)
-    }
-
-    BoxWithConstraints(modifier.then(zoomModifier)) {
-        val baseWidth = (maxWidth - 28.dp).coerceAtMost(900.dp).coerceAtLeast(240.dp)
-        val pageWidth = baseWidth * zoom
-        when (viewModel.scrollAxis) {
-            ScrollAxis.VERTICAL -> VerticalPages(
-                viewModel = viewModel,
-                session = session,
-                pageWidth = pageWidth,
-                viewportWidth = maxWidth,
-                readOnly = readOnly,
-            )
-            ScrollAxis.HORIZONTAL -> HorizontalPages(
-                viewModel = viewModel,
-                session = session,
-                pageWidth = pageWidth,
-                viewportHeight = maxHeight,
-                readOnly = readOnly,
-            )
-        }
-    }
-}
-
-@Composable
-private fun VerticalPages(
-    viewModel: MainViewModel,
-    session: NoteSession,
-    pageWidth: androidx.compose.ui.unit.Dp,
-    viewportWidth: androidx.compose.ui.unit.Dp,
-    readOnly: Boolean,
-) {
-    val verticalState = rememberLazyListState()
-    val horizontalState = rememberScrollState()
-    LaunchedEffect(session.activePageIndex, session.pages.size) {
-        if (session.pages.isNotEmpty()) {
-            verticalState.animateScrollToItem(
-                session.activePageIndex.coerceIn(0, session.pages.lastIndex),
-            )
-        }
-    }
-    Box(Modifier.fillMaxSize().horizontalScroll(horizontalState)) {
-        Box(
-            Modifier.width(maxOf(pageWidth, viewportWidth)).fillMaxHeight(),
-            contentAlignment = Alignment.TopCenter,
-        ) {
-            LazyColumn(
-                modifier = Modifier.width(pageWidth).fillMaxHeight(),
-                state = verticalState,
-                userScrollEnabled = false,
-                contentPadding = PaddingValues(vertical = PAGE_GAP),
-                verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                itemsIndexed(session.pages, key = { _, page -> page.id }) { index, page ->
-                    ZoomPage(
-                        viewModel = viewModel,
-                        session = session,
-                        page = page,
-                        index = index,
-                        readOnly = readOnly,
-                        modifier = Modifier.fillMaxWidth(),
-                        onNavigationPan = { dx, dy ->
-                            horizontalState.dispatchRawDelta(-dx)
-                            verticalState.dispatchRawDelta(-dy)
-                        },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun HorizontalPages(
-    viewModel: MainViewModel,
-    session: NoteSession,
-    pageWidth: androidx.compose.ui.unit.Dp,
-    viewportHeight: androidx.compose.ui.unit.Dp,
-    readOnly: Boolean,
-) {
-    val horizontalState = rememberLazyListState()
-    val verticalState = rememberScrollState()
-    val tallestPage = session.pages.maxOfOrNull {
-        pageWidth * (it.height / it.width)
-    } ?: viewportHeight
-    val contentHeight = maxOf(tallestPage + PAGE_GAP * 2, viewportHeight)
-
-    LaunchedEffect(session.activePageIndex, session.pages.size) {
-        if (session.pages.isNotEmpty()) {
-            horizontalState.animateScrollToItem(
-                session.activePageIndex.coerceIn(0, session.pages.lastIndex),
-            )
-        }
-    }
-
-    Box(Modifier.fillMaxSize().verticalScroll(verticalState)) {
-        LazyRow(
-            modifier = Modifier.fillMaxWidth().height(contentHeight),
-            state = horizontalState,
-            userScrollEnabled = false,
-            contentPadding = PaddingValues(horizontal = PAGE_GAP),
-            horizontalArrangement = Arrangement.spacedBy(PAGE_GAP),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            itemsIndexed(session.pages, key = { _, page -> page.id }) { index, page ->
-                ZoomPage(
-                    viewModel = viewModel,
-                    session = session,
-                    page = page,
-                    index = index,
-                    readOnly = readOnly,
-                    modifier = Modifier.width(pageWidth),
-                    onNavigationPan = { dx, dy ->
-                        horizontalState.dispatchRawDelta(-dx)
-                        verticalState.dispatchRawDelta(-dy)
-                    },
-                )
-            }
+    val authoringPages = remember(session.id) { mutableStateMapOf<String, Boolean>() }
+    DocumentPages(
+        session = session,
+        scrollAxis = viewModel.scrollAxis,
+        navigationMode = viewModel.navigationGestureMode,
+        readOnly = readOnly,
+        modifier = modifier,
+        onVisiblePage = { viewModel.activatePage(it, scrollToPage = false) },
+        navigationBlocked = { authoringPages.isNotEmpty() },
+    ) { index, page, pageWidth ->
+        ZoomPage(
+            viewModel = viewModel,
+            session = session,
+            page = page,
+            index = index,
+            readOnly = readOnly,
+            modifier = Modifier.width(pageWidth),
+            onAuthoringChanged = { busy ->
+                if (busy) authoringPages[page.id] = true else authoringPages.remove(page.id)
+            },
+        )
+        DisposableEffect(page.id) {
+            onDispose { authoringPages.remove(page.id) }
         }
     }
 }
@@ -2234,13 +2157,19 @@ private fun ZoomPage(
     index: Int,
     readOnly: Boolean,
     modifier: Modifier,
-    onNavigationPan: (Float, Float) -> Unit,
+    onAuthoringChanged: (Boolean) -> Unit,
 ) {
-    val background by produceState<Bitmap?>(initialValue = null, session.id, page.id) {
-        value = viewModel.renderPdfPage(session, page, 1200)
+    var pdfWidth by remember(page.id) { mutableIntStateOf(0) }
+    val background by produceState<Bitmap?>(initialValue = null, session.id, page.id, pdfWidth) {
+        if (pdfWidth > 0 && page.pdfPageIndex != null) {
+            delay(120)
+            value = viewModel.renderPdfPage(session, page, pdfWidth)
+        }
     }
     Card(
-        modifier = modifier,
+        modifier = modifier.onSizeChanged { size ->
+            pdfWidth = ((size.width + 255) / 256 * 256).coerceIn(256, 2400)
+        },
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White),
         shape = androidx.compose.ui.graphics.RectangleShape,
@@ -2261,7 +2190,8 @@ private fun ZoomPage(
                         navigationGestureProvider = { viewModel.navigationGestureMode },
                         circleToLassoEnabledProvider = { viewModel.circleToLassoEnabled },
                         readOnlyProvider = { readOnly },
-                        onNavigationPan = onNavigationPan,
+                        externalNavigation = true,
+                        onNavigationPan = { _, _ -> },
                         onStrokeAdded = { runtime -> viewModel.addStroke(page, runtime) },
                         onEraseStart = { viewModel.beginErase(page) },
                         onErase = { x, y, radius -> viewModel.eraseAt(page, x, y, radius) },
@@ -2292,7 +2222,8 @@ private fun ZoomPage(
                         onImageMove = { id, x, y -> viewModel.moveImage(page, id, x, y) },
                         onImageTransformEnd = { viewModel.endImageTransform(page) },
                         onImageTransformCancel = { viewModel.cancelImageTransform(page) },
-                        onActivated = { viewModel.activatePage(index) },
+                        onActivated = { viewModel.activatePage(index, scrollToPage = false) },
+                        onAuthoringChanged = onAuthoringChanged,
                     )
                 },
                 modifier = Modifier.fillMaxSize(),
@@ -2313,32 +2244,6 @@ private fun ZoomPage(
                     }
                 }
             }
-        }
-    }
-}
-
-private fun Modifier.sharedPageZoomGesture(
-    onZoom: (Float) -> Unit,
-): Modifier = pointerInput(Unit) {
-    awaitEachGesture {
-        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
-        var wasZooming = false
-        while (true) {
-            val event = awaitPointerEvent(PointerEventPass.Initial)
-            val touchCount = event.changes.count {
-                it.pressed && it.type == PointerType.Touch
-            }
-            if (touchCount >= 2) {
-                val factor = event.calculateZoom()
-                if (factor.isFinite() && factor > 0f) {
-                    onZoom(factor.coerceIn(0.8f, 1.25f))
-                }
-                event.changes.forEach { it.consume() }
-                wasZooming = true
-            } else if (wasZooming) {
-                event.changes.forEach { it.consume() }
-            }
-            if (event.changes.none { it.pressed }) break
         }
     }
 }
@@ -2473,5 +2378,3 @@ private fun NameDialog(
         },
     )
 }
-
-private val PAGE_GAP = 10.dp

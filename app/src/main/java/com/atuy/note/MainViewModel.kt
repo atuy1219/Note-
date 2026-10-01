@@ -503,9 +503,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         preferences.edit().putBoolean("circle_to_lasso", enabled).apply()
     }
 
-    fun activatePage(index: Int) {
+    fun activatePage(index: Int, scrollToPage: Boolean = true) {
         val session = activeSession ?: return
         session.activePageIndex = index.coerceIn(0, session.pages.lastIndex.coerceAtLeast(0))
+        if (scrollToPage) session.requestPageNavigation()
     }
 
     fun addPage() {
@@ -522,6 +523,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ),
         )
         session.activePageIndex = insertAt
+        session.requestPageNavigation()
         markDirty(session)
     }
 
@@ -531,6 +533,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val insertAt = index + 1
         session.pages.add(insertAt, source.duplicate())
         session.activePageIndex = insertAt
+        session.requestPageNavigation()
         markDirty(session)
     }
 
@@ -542,7 +545,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (index !in session.pages.indices) return
         session.pages.removeAt(index)
+        if (index < session.activePageIndex) session.activePageIndex--
         session.activePageIndex = session.activePageIndex.coerceIn(0, session.pages.lastIndex)
+        session.requestPageNavigation()
         markDirty(session)
     }
 
@@ -553,17 +558,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val page = session.pages.removeAt(index)
         session.pages.add(target, page)
         session.activePageIndex = target
+        session.requestPageNavigation()
         markDirty(session)
     }
 
     fun addStroke(page: PageSession, runtime: RuntimeStroke) {
         page.add(runtime)
-        markDirty()
+        markDirty(page)
     }
 
     fun beginErase(page: PageSession) { page.beginEraseGesture() }
     fun eraseAt(page: PageSession, x: Float, y: Float, radius: Float) { page.eraseAt(x, y, radius) }
-    fun endErase(page: PageSession) { if (page.endEraseGesture()) markDirty() }
+    fun endErase(page: PageSession) { if (page.endEraseGesture()) markDirty(page) }
 
     fun selectWithLasso(page: PageSession, lasso: Stroke) {
         val count = page.selectWithLasso(lasso.inputs, lassoCoverageMode)
@@ -574,13 +580,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!page.consumeStrokeForLasso(strokeId)) return
         val count = page.selectWithLasso(lasso.inputs, lassoCoverageMode)
         toolMode = ToolMode.LASSO
-        markDirty()
+        markDirty(page)
         statusMessage = if (count == 0) "囲みを投げ縄に変換しました（選択なし）" else "$count 本の線を選択"
     }
 
     fun beginSelectedStrokeTransform(page: PageSession): Boolean = page.beginSelectedStrokeTransform()
     fun moveSelectedStrokes(page: PageSession, dx: Float, dy: Float) { page.transformSelectedStrokes(dx, dy) }
-    fun endSelectedStrokeTransform(page: PageSession) { if (page.endSelectedStrokeTransform()) markDirty() }
+    fun endSelectedStrokeTransform(page: PageSession) { if (page.endSelectedStrokeTransform()) markDirty(page) }
     fun cancelSelectedStrokeTransform(page: PageSession) { page.cancelSelectedStrokeTransform() }
 
     fun scaleSelectedStrokes(factor: Float) {
@@ -634,7 +640,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun beginImageTransform(page: PageSession, imageId: String): Boolean = page.beginImageTransform(imageId)
     fun moveImage(page: PageSession, imageId: String, x: Float, y: Float) { page.moveImage(imageId, x, y) }
-    fun endImageTransform(page: PageSession) { if (page.endImageTransform()) markDirty() }
+    fun endImageTransform(page: PageSession) { if (page.endImageTransform()) markDirty(page) }
     fun cancelImageTransform(page: PageSession) { page.cancelImageTransform() }
 
     fun scaleSelectedImage(factor: Float) {
@@ -651,7 +657,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun redo() { if (activePage?.redo() == true) markDirty() }
 
     fun saveActive() {
-        activeSession?.let { session -> viewModelScope.launch { runBusy { saveNow(session) } } }
+        activeSession?.let { session ->
+            viewModelScope.launch {
+                runBusy {
+                    saveNow(session)
+                    statusMessage = "ノートを保存しました"
+                }
+            }
+        }
     }
 
     suspend fun renderPdfPage(session: NoteSession, page: PageSession, targetWidth: Int): Bitmap? =
@@ -693,6 +706,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun markDirty() { activeSession?.let(::markDirty) }
+
+    private fun markDirty(page: PageSession) {
+        openTabs.firstOrNull { session -> session.pages.any { it === page } }?.let(::markDirty)
+    }
 
     private fun markDirty(session: NoteSession) {
         session.markEdited()
