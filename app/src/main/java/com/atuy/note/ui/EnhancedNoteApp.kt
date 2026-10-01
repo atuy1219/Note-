@@ -56,7 +56,6 @@ import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.AutoAwesome
-import androidx.compose.material.icons.filled.AutoFixNormal
 import androidx.compose.material.icons.filled.BorderColor
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Category
@@ -133,8 +132,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -1063,6 +1066,7 @@ private fun EditorWorkspace(
             onPanel = { target ->
                 panel = if (panel == target) null else target
             },
+            onDismissPanel = { panel = null },
         )
     }
 
@@ -1171,6 +1175,7 @@ private fun EditorCommandBar(
     onTogglePages: () -> Unit,
     onToggleReadOnly: () -> Unit,
     onPanel: (EditorPanel) -> Unit,
+    onDismissPanel: () -> Unit,
 ) {
     val details = CommandSpec(Icons.Default.MoreHoriz, "詳細", activePanel == EditorPanel.DETAILS) {
         onPanel(EditorPanel.DETAILS)
@@ -1185,29 +1190,39 @@ private fun EditorCommandBar(
         false,
         viewModel::addPage,
     )
+    val penSelected = !readOnly && viewModel.toolMode == ToolMode.PEN &&
+        viewModel.brushSpec.kind != BrushKind.HIGHLIGHTER
     val pen = CommandSpec(
         Icons.Default.Brush,
         "ペン",
-        !readOnly && viewModel.toolMode == ToolMode.PEN &&
-            viewModel.brushSpec.kind != BrushKind.HIGHLIGHTER,
+        penSelected,
     ) {
         if (!readOnly) {
-            if (viewModel.brushSpec.kind == BrushKind.HIGHLIGHTER) {
-                viewModel.setBrushKind(BrushKind.PRESSURE_PEN)
+            if (penSelected) {
+                onPanel(EditorPanel.PEN)
             } else {
-                viewModel.setTool(ToolMode.PEN)
+                if (viewModel.brushSpec.kind == BrushKind.HIGHLIGHTER) {
+                    viewModel.setBrushKind(BrushKind.PRESSURE_PEN)
+                } else {
+                    viewModel.setTool(ToolMode.PEN)
+                }
+                onDismissPanel()
             }
-            onPanel(EditorPanel.PEN)
         }
     }
+    val eraserSelected = !readOnly && viewModel.toolMode == ToolMode.ERASER
     val eraser = CommandSpec(
-        Icons.Default.AutoFixNormal,
+        EraserIcon,
         "消しゴム",
-        !readOnly && viewModel.toolMode == ToolMode.ERASER,
+        eraserSelected,
     ) {
         if (!readOnly) {
-            viewModel.setTool(ToolMode.ERASER)
-            onPanel(EditorPanel.ERASER)
+            if (eraserSelected) {
+                onPanel(EditorPanel.ERASER)
+            } else {
+                viewModel.setTool(ToolMode.ERASER)
+                onDismissPanel()
+            }
         }
     }
     val text = CommandSpec(Icons.Default.TextFields, "テキスト", activePanel == EditorPanel.TEXT) {
@@ -1347,6 +1362,30 @@ private fun EditorCommandBar(
         }
     }
 }
+
+private val EraserIcon = ImageVector.Builder(
+    name = "Eraser",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).path(
+    stroke = SolidColor(Color.Black),
+    strokeLineWidth = 2f,
+    strokeLineCap = StrokeCap.Round,
+    strokeLineJoin = StrokeJoin.Round,
+) {
+    moveTo(15f, 3f)
+    lineTo(21f, 9f)
+    lineTo(10f, 20f)
+    lineTo(6f, 20f)
+    lineTo(2f, 16f)
+    close()
+    moveTo(8f, 10f)
+    lineTo(14f, 16f)
+    moveTo(10f, 20f)
+    lineTo(22f, 20f)
+}.build()
 
 private data class CommandSpec(
     val icon: ImageVector,
