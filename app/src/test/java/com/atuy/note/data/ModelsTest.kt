@@ -8,6 +8,31 @@ import org.junit.Test
 import java.io.File
 
 class ModelsTest {
+    @Test
+    fun editingHistoryUpdatesUndoAndRedoAvailability() {
+        val page = PageSession(PageDocument())
+        assertFalse(page.canUndo)
+        assertFalse(page.canRedo)
+        page.addImage(PageImage(entryName = "images/test.png", x = 0f, y = 0f, width = 100f, height = 100f))
+        assertTrue(page.canUndo)
+        assertFalse(page.canRedo)
+        assertTrue(page.undo())
+        assertFalse(page.canUndo)
+        assertTrue(page.canRedo)
+        assertTrue(page.redo())
+        assertTrue(page.canUndo)
+        assertFalse(page.canRedo)
+    }
+
+    @Test
+    fun touchingAPageDoesNotRequestNavigation() {
+        val session = NoteSession(NoteDocument(title = "Test"), File("note.atnote"), null)
+        session.activePageIndex = 0
+        assertEquals(0, session.pageNavigationVersion)
+        session.requestPageNavigation()
+        assertEquals(1, session.pageNavigationVersion)
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun missingStrokeDataDoesNotSilentlyOpenAnEmptyPage() {
         PageSession(PageDocument(strokes = listOf(StoredStroke(brush = BrushSpec()))))

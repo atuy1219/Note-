@@ -6,6 +6,8 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Matrix
+import androidx.ink.rendering.android.canvas.CanvasStrokeRenderer
 import android.graphics.RectF
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
@@ -351,9 +353,8 @@ class NoteRepository(private val context: Context) {
                     ParcelFileDescriptor.open(source, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
                         PdfRenderer(descriptor).use { renderer ->
                             renderer.openPage(index).use { pdfPage ->
-                                val width = targetWidth.coerceIn(360, 1600)
-                                val height = (width * pdfPage.height.toFloat() / pdfPage.width.toFloat()).toInt().coerceAtLeast(1)
-                                Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap ->
+                                val size = boundedRenderSize(targetWidth, pdfPage.width.toFloat(), pdfPage.height.toFloat())
+                                Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888).also { bitmap ->
                                     bitmap.eraseColor(Color.WHITE)
                                     pdfPage.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                                 }
@@ -365,17 +366,19 @@ class NoteRepository(private val context: Context) {
         }
 
     suspend fun renderPagePreview(session: NoteSession, page: PageSession, targetWidth: Int): Bitmap {
-        val width = targetWidth.coerceIn(160, 1200)
-        val height = (width * page.height / page.width).toInt().coerceAtLeast(1)
-        val base = renderPdfPage(session, page, width)
-            ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
+        val strokes = page.strokes.toList()
+        val images = page.images.toList()
+        val bitmaps = session.imageBitmaps.toMap()
+        val size = boundedRenderSize(targetWidth.coerceAtMost(1200), page.width, page.height)
+        val base = renderPdfPage(session, page, size.width)
+            ?: Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
         return withContext(Dispatchers.Default) {
             val canvas = Canvas(base)
             val sx = base.width / page.width
             val sy = base.height / page.height
             val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-            page.images.forEach { image ->
-                val imageBitmap = session.imageBitmaps[image.entryName] ?: return@forEach
+            images.forEach { image ->
+                val imageBitmap = bitmaps[image.entryName] ?: return@forEach
                 canvas.drawBitmap(
                     imageBitmap,
                     null,
@@ -388,23 +391,7 @@ class NoteRepository(private val context: Context) {
                     imagePaint,
                 )
             }
-            page.strokes.forEach { runtime ->
-                val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = runtime.stored.brush.colorArgb
-                    strokeWidth = runtime.stored.brush.size * sx
-                    style = Paint.Style.STROKE
-                    strokeCap = Paint.Cap.ROUND
-                    strokeJoin = Paint.Join.ROUND
-                }
-                if (runtime.samples.size == 1) {
-                    val sample = runtime.samples.first()
-                    canvas.drawCircle(sample.x * sx, sample.y * sy, paint.strokeWidth / 2f, paint)
-                } else {
-                    runtime.samples.zipWithNext().forEach { (a, b) ->
-                        canvas.drawLine(a.x * sx, a.y * sy, b.x * sx, b.y * sy, paint)
-                    }
-                }
-            }
+            drawInk(canvas, strokes, sx, sy)
             base
         }
     }
@@ -640,9 +627,11 @@ class NoteRepository(private val context: Context) {
         imageFiles: Map<String, File>,
         inkEntries: Map<String, ByteArray>,
     ): File {
-        val width = 480
+        val requestedWidth = 480
         val first = document.pages.firstOrNull() ?: PageDocument()
-        val height = (width * first.height / first.width).toInt().coerceAtLeast(1)
+        val renderSize = boundedRenderSize(requestedWidth, first.width, first.height)
+        val width = renderSize.width
+        val height = renderSize.height
         val bitmap = if (pdfFile?.isFile == true && first.pdfPageIndex != null) {
             runCatching {
                 ParcelFileDescriptor.open(pdfFile, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
@@ -681,23 +670,24 @@ class NoteRepository(private val context: Context) {
             imageBitmap.recycle()
         }
 
-        first.strokes.forEach { stored ->
-            val runtime = stored.toRuntimeOrNull(inkEntries[stored.inkEntry]) ?: return@forEach
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = stored.brush.colorArgb
-                strokeWidth = stored.brush.size * sx
-                style = Paint.Style.STROKE
-                strokeCap = Paint.Cap.ROUND
-                strokeJoin = Paint.Join.ROUND
-            }
-            runtime.samples.zipWithNext().forEach { (a, b) ->
-                canvas.drawLine(a.x * sx, a.y * sy, b.x * sx, b.y * sy, paint)
-            }
-        }
+        val strokes = first.strokes.mapNotNull { stored -> stored.toRuntimeOrNull(inkEntries[stored.inkEntry]) }
+        drawInk(canvas, strokes, sx, sy)
         val file = thumbnailFile(document.id)
         FileOutputStream(file).use { outputBitmap.compress(Bitmap.CompressFormat.PNG, 90, it) }
         outputBitmap.recycle()
         return file
+    }
+
+    private fun drawInk(canvas: Canvas, strokes: List<RuntimeStroke>, sx: Float, sy: Float) {
+        val renderer = CanvasStrokeRenderer.create()
+        val transform = Matrix().apply { setScale(sx, sy) }
+        canvas.save()
+        canvas.concat(transform)
+        try {
+            strokes.forEach { renderer.draw(canvas, it.stroke, transform) }
+        } finally {
+            canvas.restore()
+        }
     }
 
     private fun decodeContentImage(uri: Uri, maxDimension: Int): Bitmap? {

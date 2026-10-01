@@ -503,9 +503,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         preferences.edit().putBoolean("circle_to_lasso", enabled).apply()
     }
 
-    fun activatePage(index: Int) {
+    fun activatePage(index: Int, scrollToPage: Boolean = true) {
         val session = activeSession ?: return
         session.activePageIndex = index.coerceIn(0, session.pages.lastIndex.coerceAtLeast(0))
+        if (scrollToPage) session.requestPageNavigation()
     }
 
     fun addPage() {
@@ -522,6 +523,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ),
         )
         session.activePageIndex = insertAt
+        session.requestPageNavigation()
         markDirty(session)
     }
 
@@ -531,6 +533,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val insertAt = index + 1
         session.pages.add(insertAt, source.duplicate())
         session.activePageIndex = insertAt
+        session.requestPageNavigation()
         markDirty(session)
     }
 
@@ -542,7 +545,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (index !in session.pages.indices) return
         session.pages.removeAt(index)
+        if (index < session.activePageIndex) session.activePageIndex--
         session.activePageIndex = session.activePageIndex.coerceIn(0, session.pages.lastIndex)
+        session.requestPageNavigation()
         markDirty(session)
     }
 
@@ -553,6 +558,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val page = session.pages.removeAt(index)
         session.pages.add(target, page)
         session.activePageIndex = target
+        session.requestPageNavigation()
         markDirty(session)
     }
 
@@ -651,7 +657,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun redo() { if (activePage?.redo() == true) markDirty() }
 
     fun saveActive() {
-        activeSession?.let { session -> viewModelScope.launch { runBusy { saveNow(session) } } }
+        activeSession?.let { session ->
+            viewModelScope.launch {
+                runBusy {
+                    saveNow(session)
+                    statusMessage = "ノートを保存しました"
+                }
+            }
+        }
     }
 
     suspend fun renderPdfPage(session: NoteSession, page: PageSession, targetWidth: Int): Bitmap? =

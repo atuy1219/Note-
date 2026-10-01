@@ -101,6 +101,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private var navigationGestureProvider: () -> NavigationGestureMode = { NavigationGestureMode.ONE_FINGER }
     private var circleToLassoEnabledProvider: () -> Boolean = { false }
     private var readOnlyProvider: () -> Boolean = { false }
+    private var externalNavigation = false
     private var onNavigationPan: (Float, Float) -> Unit = { _, _ -> }
     private var onStrokeAdded: (RuntimeStroke) -> Unit = {}
     private var onEraseStart: () -> Unit = {}
@@ -119,6 +120,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private var onImageTransformEnd: () -> Unit = {}
     private var onImageTransformCancel: () -> Unit = {}
     private var onActivated: () -> Unit = {}
+    private var onAuthoringChanged: (Boolean) -> Unit = {}
 
     private var draggingImageId: String? = null
     private var imageDragOffsetX = 0f
@@ -175,6 +177,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 postOnAnimation {
                     wetView.removeFinishedStrokes(finishedIds)
                     pendingFinishedStrokeIds.removeAll(finishedIds)
+                    onAuthoringChanged(pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty())
                     flushPendingViewportMutations()
                     dryView.postInvalidateOnAnimation()
                 }
@@ -192,6 +195,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         navigationGestureProvider: () -> NavigationGestureMode,
         circleToLassoEnabledProvider: () -> Boolean,
         readOnlyProvider: () -> Boolean = { false },
+        externalNavigation: Boolean = false,
         onNavigationPan: (Float, Float) -> Unit,
         onStrokeAdded: (RuntimeStroke) -> Unit,
         onEraseStart: () -> Unit,
@@ -210,6 +214,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         onImageTransformEnd: () -> Unit,
         onImageTransformCancel: () -> Unit,
         onActivated: () -> Unit,
+        onAuthoringChanged: (Boolean) -> Unit = {},
     ) {
         if (boundPageId != page.id) {
             cancelPendingCircleLasso()
@@ -225,6 +230,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         this.navigationGestureProvider = navigationGestureProvider
         this.circleToLassoEnabledProvider = circleToLassoEnabledProvider
         this.readOnlyProvider = readOnlyProvider
+        this.externalNavigation = externalNavigation
         this.onNavigationPan = onNavigationPan
         this.onStrokeAdded = onStrokeAdded
         this.onEraseStart = onEraseStart
@@ -243,6 +249,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         this.onImageTransformEnd = onImageTransformEnd
         this.onImageTransformCancel = onImageTransformCancel
         this.onActivated = onActivated
+        this.onAuthoringChanged = onAuthoringChanged
         dryView.page = page
         dryView.backgroundBitmap = background
         dryView.imageBitmaps = imageBitmaps
@@ -260,7 +267,10 @@ class InkPageView(context: Context) : FrameLayout(context) {
         if (event.actionMasked == MotionEvent.ACTION_DOWN ||
             event.actionMasked == MotionEvent.ACTION_POINTER_DOWN
         ) {
-            requestDisallowInterceptTouchEvent(true)
+            if (!externalNavigation || (0 until event.pointerCount).any {
+                event.getToolType(it) == MotionEvent.TOOL_TYPE_STYLUS ||
+                    event.getToolType(it) == MotionEvent.TOOL_TYPE_ERASER
+            }) requestDisallowInterceptTouchEvent(true)
         }
         return true
     }
@@ -276,6 +286,10 @@ class InkPageView(context: Context) : FrameLayout(context) {
 
     private fun handleMotionEvent(event: MotionEvent): Boolean {
         if (event.pointerCount <= 0) return false
+        if (event.actionMasked == MotionEvent.ACTION_CANCEL) {
+            cancelInput(event)
+            return true
+        }
         val actionIndex = event.actionIndex.coerceIn(0, event.pointerCount - 1)
         val stylusIndex = (0 until event.pointerCount).firstOrNull { index ->
             val type = event.getToolType(index)
@@ -290,6 +304,10 @@ class InkPageView(context: Context) : FrameLayout(context) {
         val actionIsStylus = actionToolType == MotionEvent.TOOL_TYPE_STYLUS ||
             actionToolType == MotionEvent.TOOL_TYPE_ERASER
 
+        if (actionIsStylus && pointerStrokes.containsKey(event.getPointerId(routedIndex))) {
+            return handleAuthoredStroke(event, routedIndex, brushProvider().toBrush(), false)
+        }
+
         if (readOnlyProvider() && actionIsStylus) {
             if (event.actionMasked == MotionEvent.ACTION_DOWN ||
                 event.actionMasked == MotionEvent.ACTION_POINTER_DOWN
@@ -303,6 +321,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
 
         if (!actionIsStylus) {
             if (stylusIndex != null) return true
+            if (externalNavigation) return true
             return handleTouchMotion(event)
         }
 
@@ -319,11 +338,11 @@ class InkPageView(context: Context) : FrameLayout(context) {
         val temporaryEraser = actionToolType == MotionEvent.TOOL_TYPE_ERASER ||
             event.buttonState and MotionEvent.BUTTON_STYLUS_PRIMARY != 0 ||
             event.buttonState and MotionEvent.BUTTON_STYLUS_SECONDARY != 0
-        val erasing = toolProvider() == ToolMode.ERASER || temporaryEraser
+        val erasing = eraserGestureActive || toolProvider() == ToolMode.ERASER || temporaryEraser
         val point = mapViewToWorld(event.getX(routedIndex), event.getY(routedIndex))
 
         if (erasing) {
-            val radius = 28f / viewport.zoom
+            val radius = screenDistanceToWorld(28f)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                     if (!eraserGestureActive) {
@@ -550,6 +569,27 @@ class InkPageView(context: Context) : FrameLayout(context) {
         return PointF(point.x, point.y)
     }
 
+    private fun screenDistanceToWorld(distance: Float): Float =
+        distance / (currentViewportTransform()?.scale ?: 1f)
+
+    private fun cancelInput(event: MotionEvent) {
+        cancelPendingCircleLasso()
+        pointerStrokes.values.forEach { wetView.cancelStroke(it, event) }
+        pointerStrokes.clear()
+        strokeBrushSpecs.keys.retainAll(pendingFinishedStrokeIds)
+        lassoStrokeIds.retainAll(pendingFinishedStrokeIds)
+        if (selectedDragActive) onSelectedTransformCancel()
+        selectedDragActive = false
+        if (draggingImageId != null) onImageTransformCancel()
+        draggingImageId = null
+        finishEraserGesture()
+        touchGestureActive = false
+        scaleGestureInProgress = false
+        onAuthoringChanged(pendingFinishedStrokeIds.isNotEmpty())
+        releaseParentIntercept()
+        dryView.postInvalidateOnAnimation()
+    }
+
     private fun handleLassoMotion(event: MotionEvent, pointerIndex: Int): Boolean {
         val currentPage = page ?: return true
         val point = mapViewToWorld(event.getX(pointerIndex), event.getY(pointerIndex))
@@ -568,7 +608,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 if (selectedDragActive) {
                     val dx = point.x - selectedDragStartX
                     val dy = point.y - selectedDragStartY
-                    if (!selectedDragMoved && hypot(dx, dy) > SELECTED_DRAG_SLOP / viewport.zoom) {
+                    if (!selectedDragMoved && hypot(dx, dy) > screenDistanceToWorld(SELECTED_DRAG_SLOP)) {
                         selectedDragMoved = true
                         lassoOutline = emptyList()
                     }
@@ -622,6 +662,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
                     strokeToWorldTransform = Matrix(),
                 )
                 pointerStrokes[pointerId] = id
+                onAuthoringChanged(true)
                 if (lasso) lassoStrokeIds += id else strokeBrushSpecs[id] = brushProvider()
                 true
             }
@@ -653,6 +694,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 pointerStrokes.clear()
                 strokeBrushSpecs.clear()
                 lassoStrokeIds.clear()
+                onAuthoringChanged(pendingFinishedStrokeIds.isNotEmpty())
                 releaseParentIntercept()
                 true
             }
@@ -715,7 +757,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
                                 val dx = point.x - selectedDragStartX
                                 val dy = point.y - selectedDragStartY
                                 if (!selectedDragMoved &&
-                                    hypot(dx, dy) > SELECTED_DRAG_SLOP / viewport.zoom
+                                    hypot(dx, dy) > screenDistanceToWorld(SELECTED_DRAG_SLOP)
                                 ) {
                                     selectedDragMoved = true
                                     lassoOutline = emptyList()
@@ -725,7 +767,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
                             }
                         } else if (!circleHoldCancelled) {
                             val distance = hypot(point.x - circleHoldStartX, point.y - circleHoldStartY)
-                            if (distance > CIRCLE_HOLD_SLOP / viewport.zoom) {
+                            if (distance > screenDistanceToWorld(CIRCLE_HOLD_SLOP)) {
                                 circleHoldCancelled = true
                                 circleHoldRunnable?.let(::removeCallbacks)
                                 circleHoldRunnable = null
@@ -799,7 +841,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
 
     private fun isPointOnClosedLoop(x: Float, y: Float, samples: List<InkSample>): Boolean {
         if (samples.size < 3) return false
-        val tolerance = CIRCLE_HOLD_HIT_RADIUS / viewport.zoom
+        val tolerance = screenDistanceToWorld(CIRCLE_HOLD_HIT_RADIUS)
         val toleranceSquared = tolerance * tolerance
         val segments = samples.zipWithNext() + listOf(samples.last() to samples.first())
         return segments.any { (a, b) ->

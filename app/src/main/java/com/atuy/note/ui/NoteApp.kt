@@ -830,7 +830,7 @@ private fun NotePage(
                         onImageMove = { id, x, y -> viewModel.moveImage(page, id, x, y) },
                         onImageTransformEnd = { viewModel.endImageTransform(page) },
                         onImageTransformCancel = { viewModel.cancelImageTransform(page) },
-                        onActivated = { viewModel.activatePage(index) },
+                        onActivated = { viewModel.activatePage(index, scrollToPage = false) },
                     )
                 },
                 modifier = Modifier.fillMaxWidth().aspectRatio(page.width / page.height),

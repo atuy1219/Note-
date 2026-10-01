@@ -9,9 +9,15 @@
 
 ## Rendering
 
-`InkViewport` is the single owner of page fit, zoom, and pan. `DryInkView` applies its matrix once to the canvas and draws the optional PDF bitmap, page images, and completed Ink strokes in that same world coordinate system. The same complete transform is also supplied to `CanvasStrokeRenderer` for screen-space rendering quality; that argument describes the canvas transform but does not apply it. Stylus input remains as the raw view-space `MotionEvent`; the inverse viewport matrix is supplied to `InProgressStrokesView.startStroke`, as required by AndroidX Ink, so wet and dry coordinates do not diverge after zooming.
+`DocumentPages` owns a single 35–500% zoom and the page-list/cross-axis scroll state. Pinch gestures capture the page and fractional point under the fingers, request the matching lazy-list offset during remeasure, and apply the cross-axis correction after placement. An anchor is retained across input events until layout catches up. Fixed page gaps and the centered margins of differently sized PDF pages are included in the calculation.
 
-Finger gestures are consumed by `InkPageView` for pinch zoom and viewport pan, or forwarded as page-list navigation deltas at 1x. Completed strokes are added to the page model, the dry layer is invalidated, and their wet copies are removed within the same UI run loop. `PageSession.contentVersion` is observed directly by the `AndroidView` update block so the first stroke in a new note also schedules a dry redraw without requiring a tool change.
+The active UI binds `InkPageView` with external navigation, so it cannot apply a second page-local zoom. `InkViewport` supplies the fit transform for PDF, images, completed ink, and input inversion. The legacy UI may still use its local camera. `CanvasStrokeRenderer` receives the same transform already applied to the Canvas; its transform argument describes rendering scale and does not apply that transform a second time.
+
+Finger navigation waits for touch slop, supports the selected one/two-finger mode, and adds inertia to single-finger pans. Gestures containing a stylus do not move the camera. Navigation also waits for the completed-stroke handoff to finish. Undo/redo availability is observable, and cancellations close pending input/transform gestures.
+
+Visible-page tracking changes the active editing page without requesting a scroll. Explicit page selection and page operations increment a separate navigation generation. Saveable UI state is scoped by note ID and removed when a tab closes, preserving zoom and scroll positions when switching tabs.
+
+PDF rendering is debounced and uses resolution buckets with dimension and pixel budgets. Previews and library thumbnails use the Ink renderer, including pressure, custom tips, highlighter opacity, and single-point strokes.
 
 ## Persistence
 
