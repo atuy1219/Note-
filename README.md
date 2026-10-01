@@ -70,18 +70,19 @@ Drive同期を実機で使用するには、ビルドするGoogle Cloudプロジ
 
 ## ビルド
 
-必要環境：JDK 17、Android SDK 35、Gradle 8.11.1。
+必要環境：JDK 17、Android SDK 37（`platforms;android-37.0`）、Build Tools 37.0.0、Gradle 9.6.0。
 
 ```bash
 gradle :app:assembleDebug
 ```
 
-Android Studioではリポジトリを開いて通常どおりSync／Runできます。GitHub Actionsも同じ条件で`assembleDebug`とユニットテストを実行します。
+Android Studioではリポジトリを開いて通常どおりSync／Runできます。GitHub Actionsも同じ条件で`assembleDebug`、`assembleRelease`とユニットテストを実行します。
 
 APK出力：
 
 ```text
-app/build/outputs/apk/debug/app-debug.apk
+app/build/outputs/apk/debug/app-arm64-v8a-debug.apk
+app/build/outputs/apk/debug/app-x86_64-debug.apk
 ```
 
 ## 現在の制約
