@@ -196,8 +196,10 @@ class PageSession(
     private var selectedStrokeTransformBefore: List<RuntimeStroke>? = null
 
     init {
-        source.strokes.mapNotNullTo(strokes) { stored ->
-            stored.toRuntimeOrNull(inkEntries[stored.inkEntry])
+        source.strokes.mapTo(strokes) { stored ->
+            requireNotNull(stored.toRuntimeOrNull(inkEntries[stored.inkEntry])) {
+                "Could not read stroke ${stored.id}; the original notebook has not been changed"
+            }
         }
         images.addAll(source.images)
     }
@@ -580,6 +582,15 @@ private sealed interface InkOperation {
     data class TransformImage(val before: PageImage, val after: PageImage) : InkOperation
 }
 
+data class NoteSaveSnapshot(
+    val document: NoteDocument,
+    val archiveFile: File,
+    val sourcePdfFile: File?,
+    val imageFiles: Map<String, File>,
+    val strokes: List<RuntimeStroke>,
+    val editGeneration: Long,
+)
+
 class NoteSession(
     document: NoteDocument,
     val archiveFile: File,
@@ -596,9 +607,31 @@ class NoteSession(
     var updatedAt by mutableStateOf(document.updatedAt)
     var revision by mutableStateOf(document.revision)
     var dirty by mutableStateOf(false)
+    private var editGeneration = 0L
     var activePageIndex by mutableIntStateOf(0)
     val pages = mutableStateListOf<PageSession>().apply {
         addAll(document.pages.map { PageSession(it, inkEntries) })
+    }
+
+    fun markEdited() {
+        editGeneration++
+        dirty = true
+    }
+
+    // Capture on the editor thread; IO only sees immutable collections.
+    fun captureSaveSnapshot(): NoteSaveSnapshot = NoteSaveSnapshot(
+        document = toDocument(nextRevision = true),
+        archiveFile = archiveFile,
+        sourcePdfFile = sourcePdfFile,
+        imageFiles = imageFiles.toMap(),
+        strokes = pages.flatMap { it.strokes.toList() },
+        editGeneration = editGeneration,
+    )
+
+    fun completeSave(snapshot: NoteSaveSnapshot) {
+        revision = snapshot.document.revision
+        updatedAt = snapshot.document.updatedAt
+        dirty = editGeneration != snapshot.editGeneration
     }
 
     fun toDocument(nextRevision: Boolean): NoteDocument {

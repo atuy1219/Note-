@@ -1,11 +1,44 @@
 package com.atuy.note.data
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.File
 
 class ModelsTest {
+    @Test(expected = IllegalArgumentException::class)
+    fun missingStrokeDataDoesNotSilentlyOpenAnEmptyPage() {
+        PageSession(PageDocument(strokes = listOf(StoredStroke(brush = BrushSpec()))))
+    }
+
+    @Test
+    fun saveSnapshotKeepsOriginalMetadataAndImageList() {
+        val session = NoteSession(NoteDocument(title = "Before"), File("note.atnote"), null)
+        session.markEdited()
+        val snapshot = session.captureSaveSnapshot()
+
+        session.title = "After"
+        session.pages.first().addImage(PageImage(entryName = "images/new.png", x = 0f, y = 0f, width = 100f, height = 100f))
+        session.markEdited()
+
+        assertEquals("Before", snapshot.document.title)
+        assertTrue(snapshot.document.pages.first().images.isEmpty())
+        session.completeSave(snapshot)
+        assertTrue(session.dirty)
+        assertEquals(snapshot.document.revision, session.revision)
+    }
+
+    @Test
+    fun completedSaveOnlyClearsDirtyForTheSavedGeneration() {
+        val session = NoteSession(NoteDocument(title = "Test"), File("note.atnote"), null)
+        session.markEdited()
+        val snapshot = session.captureSaveSnapshot()
+        session.completeSave(snapshot)
+        assertFalse(session.dirty)
+    }
+
     @Test
     fun defaultPageHasUsableDimensions() {
         val page = PageDocument()
