@@ -3,6 +3,9 @@ package com.atuy.note.ui
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import com.atuy.note.data.NoteExportFormat
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -104,6 +107,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -1813,6 +1817,18 @@ private fun DetailsPanel(
     onRename: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    val pdfExport = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(NoteExportFormat.PDF.mimeType),
+        viewModel::completeExport,
+    )
+    val pngExport = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(NoteExportFormat.PNG.mimeType),
+        viewModel::completeExport,
+    )
+    val zipExport = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(NoteExportFormat.PNG_ZIP.mimeType),
+        viewModel::completeExport,
+    )
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("ページ", style = MaterialTheme.typography.titleSmall)
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1836,6 +1852,24 @@ private fun DetailsPanel(
         HorizontalDivider()
         Text("ツールバー位置", style = MaterialTheme.typography.titleSmall)
         DockChoices(uiPreferences)
+        HorizontalDivider()
+        Text("エクスポート", style = MaterialTheme.typography.titleSmall)
+        Text("手書き・配置画像・PDF背景を含めて書き出します。", style = MaterialTheme.typography.bodySmall)
+        Button(
+            enabled = !viewModel.busy,
+            onClick = { viewModel.beginExport(NoteExportFormat.PDF)?.let(pdfExport::launch) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("全ページをPDFで保存") }
+        OutlinedButton(
+            enabled = !viewModel.busy,
+            onClick = { viewModel.beginExport(NoteExportFormat.PNG)?.let(pngExport::launch) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("現在のページを画像（PNG）で保存") }
+        OutlinedButton(
+            enabled = !viewModel.busy,
+            onClick = { viewModel.beginExport(NoteExportFormat.PNG_ZIP)?.let(zipExport::launch) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("全ページの画像をZIPで保存") }
         HorizontalDivider()
         Button(onClick = onRename, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Default.Edit, null)

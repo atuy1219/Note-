@@ -20,6 +20,9 @@ import com.atuy.note.data.FolderRecord
 import com.atuy.note.data.LassoCoverageMode
 import com.atuy.note.data.LibraryIndex
 import com.atuy.note.data.NavigationGestureMode
+import com.atuy.note.data.NoteExportFormat
+import com.atuy.note.data.NoteExportRequest
+import com.atuy.note.data.exportFileName
 import com.atuy.note.data.NoteRepository
 import com.atuy.note.data.NoteSession
 import com.atuy.note.data.NoteSummary
@@ -653,6 +656,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun undo() { if (activePage?.undo() == true) markDirty() }
     fun redo() { if (activePage?.redo() == true) markDirty() }
+
+    private var pendingExport: NoteExportRequest? = null
+
+    fun beginExport(format: NoteExportFormat): String? {
+        val session = activeSession ?: return null
+        if (busy) return null
+        pendingExport = NoteExportRequest(session.captureSaveSnapshot(), format, session.activePageIndex)
+        return exportFileName(session.title, format, session.activePageIndex)
+    }
+
+    fun completeExport(uri: Uri?) {
+        val request = pendingExport ?: return
+        pendingExport = null
+        if (uri == null) return
+        viewModelScope.launch {
+            runBusy {
+                repository.exportNote(request, uri)
+                statusMessage = "ノートを書き出しました"
+            }
+        }
+    }
 
     fun saveActive() {
         activeSession?.let { session ->

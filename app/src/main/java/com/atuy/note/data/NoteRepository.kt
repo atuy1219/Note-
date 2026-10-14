@@ -9,12 +9,15 @@ import android.graphics.Paint
 import android.graphics.Matrix
 import androidx.ink.rendering.android.canvas.CanvasStrokeRenderer
 import android.graphics.RectF
+import android.graphics.pdf.PdfDocument
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.provider.OpenableColumns
 import androidx.ink.storage.StrokeInputBatchSerialization
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -393,6 +396,125 @@ class NoteRepository(private val context: Context) {
             }
             drawInk(canvas, strokes, sx, sy)
             base
+        }
+    }
+
+    suspend fun exportNote(request: NoteExportRequest, uri: Uri) = withContext(Dispatchers.IO) {
+        val snapshot = request.snapshot
+        val pages = snapshot.document.pages
+        require(pages.isNotEmpty()) { "書き出すページがありません" }
+        val strokes = snapshot.strokes.associateBy { it.stored.id }
+        val temporary = File.createTempFile("note-export-", ".${request.format.extension}", context.cacheDir)
+        try {
+            when (request.format) {
+                NoteExportFormat.PDF -> PdfDocument().use { pdf ->
+                    pages.forEachIndexed { index, page ->
+                        val bitmap = renderExportPage(snapshot, page, strokes)
+                        try {
+                            val info = PdfDocument.PageInfo.Builder(
+                                page.width.toInt().coerceAtLeast(1),
+                                page.height.toInt().coerceAtLeast(1),
+                                index + 1,
+                            ).create()
+                            val outputPage = pdf.startPage(info)
+                            try {
+                                outputPage.canvas.drawBitmap(
+                                    bitmap, null,
+                                    RectF(0f, 0f, info.pageWidth.toFloat(), info.pageHeight.toFloat()),
+                                    Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG),
+                                )
+                            } finally {
+                                pdf.finishPage(outputPage)
+                            }
+                        } finally {
+                            bitmap.recycle()
+                        }
+                    }
+                    temporary.outputStream().use(pdf::writeTo)
+                }
+                NoteExportFormat.PNG -> {
+                    val page = pages.getOrNull(request.pageIndex) ?: error("ページが見つかりません")
+                    val bitmap = renderExportPage(snapshot, page, strokes)
+                    try {
+                        temporary.outputStream().use {
+                            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) { "画像を書き出せませんでした" }
+                        }
+                    } finally {
+                        bitmap.recycle()
+                    }
+                }
+                NoteExportFormat.PNG_ZIP -> ZipOutputStream(temporary.outputStream().buffered()).use { zip ->
+                    pages.forEachIndexed { index, page ->
+                        val bitmap = renderExportPage(snapshot, page, strokes)
+                        try {
+                            zip.putNextEntry(ZipEntry("page-${(index + 1).toString().padStart(3, '0')}.png"))
+                            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, zip)) { "画像を書き出せませんでした" }
+                            zip.closeEntry()
+                        } finally {
+                            bitmap.recycle()
+                        }
+                    }
+                }
+            }
+            currentCoroutineContext().ensureActive()
+            val output = context.contentResolver.openOutputStream(uri, "wt")
+                ?: error("保存先を開けませんでした")
+            output.use { target -> temporary.inputStream().use { it.copyTo(target) } }
+        } finally {
+            temporary.delete()
+        }
+    }
+
+    private suspend fun renderExportPage(
+        snapshot: NoteSaveSnapshot,
+        page: PageDocument,
+        strokes: Map<String, RuntimeStroke>,
+    ): Bitmap {
+        currentCoroutineContext().ensureActive()
+        val size = boundedRenderSize(2400, page.width, page.height)
+        val bitmap = Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888)
+        try {
+            bitmap.eraseColor(Color.WHITE)
+            page.pdfPageIndex?.let { index ->
+                val source = snapshot.sourcePdfFile ?: error("PDFの背景が見つかりません")
+                pdfMutex.withLock {
+                    ParcelFileDescriptor.open(source, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+                        PdfRenderer(descriptor).use { renderer ->
+                            renderer.openPage(index).use { pdfPage ->
+                                pdfPage.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_PRINT)
+                            }
+                        }
+                    }
+                }
+            }
+            val canvas = Canvas(bitmap)
+            val sx = size.width / page.width
+            val sy = size.height / page.height
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+            page.images.forEach { image ->
+                val file = snapshot.imageFiles[image.entryName] ?: error("配置画像が見つかりません")
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(file.absolutePath, bounds)
+                var sample = 1
+                while (max(bounds.outWidth, bounds.outHeight) / sample > 4096) sample *= 2
+                val options = BitmapFactory.Options().apply { inSampleSize = sample }
+                val placed = BitmapFactory.decodeFile(file.absolutePath, options)
+                    ?: error("配置画像を読み込めませんでした")
+                try {
+                    canvas.drawBitmap(
+                        placed, null,
+                        RectF(image.x * sx, image.y * sy, (image.x + image.width) * sx, (image.y + image.height) * sy),
+                        paint,
+                    )
+                } finally {
+                    placed.recycle()
+                }
+            }
+            drawInk(canvas, page.strokes.map { strokes[it.id] ?: error("手書きデータが見つかりません") }, sx, sy)
+            return bitmap
+        } catch (error: Throwable) {
+            bitmap.recycle()
+            throw error
         }
     }
 
