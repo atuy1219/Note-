@@ -407,30 +407,35 @@ class NoteRepository(private val context: Context) {
         val temporary = File.createTempFile("note-export-", ".${request.format.extension}", context.cacheDir)
         try {
             when (request.format) {
-                NoteExportFormat.PDF -> PdfDocument().use { pdf ->
-                    pages.forEachIndexed { index, page ->
-                        val bitmap = renderExportPage(snapshot, page, strokes)
-                        try {
-                            val info = PdfDocument.PageInfo.Builder(
-                                page.width.toInt().coerceAtLeast(1),
-                                page.height.toInt().coerceAtLeast(1),
-                                index + 1,
-                            ).create()
-                            val outputPage = pdf.startPage(info)
+                NoteExportFormat.PDF -> {
+                    val pdf = PdfDocument()
+                    try {
+                        pages.forEachIndexed { index, page ->
+                            val bitmap = renderExportPage(snapshot, page, strokes)
                             try {
-                                outputPage.canvas.drawBitmap(
-                                    bitmap, null,
-                                    RectF(0f, 0f, info.pageWidth.toFloat(), info.pageHeight.toFloat()),
-                                    Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG),
-                                )
+                                val info = PdfDocument.PageInfo.Builder(
+                                    page.width.toInt().coerceAtLeast(1),
+                                    page.height.toInt().coerceAtLeast(1),
+                                    index + 1,
+                                ).create()
+                                val outputPage = pdf.startPage(info)
+                                try {
+                                    outputPage.canvas.drawBitmap(
+                                        bitmap, null,
+                                        RectF(0f, 0f, info.pageWidth.toFloat(), info.pageHeight.toFloat()),
+                                        Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG),
+                                    )
+                                } finally {
+                                    pdf.finishPage(outputPage)
+                                }
                             } finally {
-                                pdf.finishPage(outputPage)
+                                bitmap.recycle()
                             }
-                        } finally {
-                            bitmap.recycle()
                         }
+                        temporary.outputStream().use(pdf::writeTo)
+                    } finally {
+                        pdf.close()
                     }
-                    temporary.outputStream().use(pdf::writeTo)
                 }
                 NoteExportFormat.PNG -> {
                     val page = pages.getOrNull(request.pageIndex) ?: error("ページが見つかりません")
