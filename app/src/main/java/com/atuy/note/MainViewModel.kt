@@ -12,6 +12,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.ink.strokes.Stroke
+import com.atuy.note.data.BrushSelection
 import com.atuy.note.data.BrushKind
 import com.atuy.note.data.BrushSpec
 import com.atuy.note.data.CustomBrushSpec
@@ -27,6 +28,8 @@ import com.atuy.note.data.RuntimeStroke
 import com.atuy.note.data.ScrollAxis
 import com.atuy.note.data.ToolMode
 import com.atuy.note.sync.DriveSyncManager
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -52,7 +55,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var toolMode by mutableStateOf(ToolMode.PEN)
         private set
-    var brushSpec by mutableStateOf(BrushSpec())
+    private var brushSelection = runCatching {
+        Json.decodeFromString<BrushSelection>(preferences.getString("brush_selection", null) ?: "{}")
+    }.getOrDefault(BrushSelection())
+    var brushSpec by mutableStateOf(brushSelection.currentBrush)
         private set
     var scrollAxis by mutableStateOf(ScrollAxis.VERTICAL)
         private set
@@ -445,40 +451,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             (0xFF shl 24) or (colorArgb and 0x00FFFFFF)
         }
         brushSpec = brushSpec.copy(colorArgb = resolvedColor, size = size.coerceIn(0.5f, 96f))
+        rememberBrush()
+        setTool(ToolMode.PEN)
+    }
+
+    fun selectPen() {
+        brushSelection = brushSelection.selectPen()
+        brushSpec = brushSelection.currentBrush
+        rememberBrush()
         setTool(ToolMode.PEN)
     }
 
     fun setBrushKind(kind: BrushKind) {
-        brushSpec = when (kind) {
-            BrushKind.PRESSURE_PEN -> brushSpec.copy(
-                kind = kind,
-                colorArgb = (0xFF shl 24) or (brushSpec.colorArgb and 0x00FFFFFF),
-                size = brushSpec.size.coerceIn(1.5f, 18f),
-                custom = null,
-            )
-            BrushKind.MARKER -> brushSpec.copy(
-                kind = kind,
-                colorArgb = (0xFF shl 24) or (brushSpec.colorArgb and 0x00FFFFFF),
-                size = brushSpec.size.coerceAtLeast(5f),
-                custom = null,
-            )
-            BrushKind.HIGHLIGHTER -> brushSpec.copy(
-                kind = kind,
-                colorArgb = (0x66 shl 24) or (if ((brushSpec.colorArgb and 0x00FFFFFF) == 0x00111111) 0x00FFF176 else brushSpec.colorArgb and 0x00FFFFFF),
-                size = brushSpec.size.coerceAtLeast(16f),
-                custom = null,
-            )
-            BrushKind.CUSTOM -> brushSpec.copy(
-                kind = kind,
-                colorArgb = (0xFF shl 24) or (brushSpec.colorArgb and 0x00FFFFFF),
-                custom = brushSpec.custom ?: CustomBrushSpec(),
-            )
-        }
+        brushSelection = brushSelection.select(kind)
+        brushSpec = brushSelection.currentBrush
+        rememberBrush()
         setTool(ToolMode.PEN)
+    }
+
+    private fun rememberBrush() {
+        brushSelection = brushSelection.update(brushSpec)
+        preferences.edit().putString("brush_selection", Json.encodeToString(brushSelection)).apply()
     }
 
     fun updateCustomBrush(custom: CustomBrushSpec) {
         brushSpec = brushSpec.copy(kind = BrushKind.CUSTOM, custom = custom)
+        rememberBrush()
         setTool(ToolMode.PEN)
     }
 

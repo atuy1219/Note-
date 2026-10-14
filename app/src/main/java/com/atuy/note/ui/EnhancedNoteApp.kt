@@ -192,7 +192,7 @@ fun EnhancedNoteApp(
         showHomeSettings = false
     }
 
-    Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface).safeDrawingPadding()) {
         AppFrame(
             viewModel = viewModel,
             uiPreferences = uiPreferences,
@@ -420,6 +420,7 @@ private fun HomeScreen(
     onOpenSettings: () -> Unit,
     snackbar: SnackbarHostState,
 ) {
+    var showAddMenu by remember { mutableStateOf(false) }
     var createNote by remember { mutableStateOf(false) }
     var createFolder by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
@@ -484,14 +485,30 @@ private fun HomeScreen(
                             IconButton(onClick = onSyncDrive) {
                                 Icon(Icons.Default.CloudSync, "Google Driveと同期")
                             }
-                            IconButton(onClick = onImportPdf) {
-                                Icon(Icons.Default.PictureAsPdf, "PDFを読み込む")
-                            }
-                            IconButton(onClick = { createFolder = true }) {
-                                Icon(Icons.Default.CreateNewFolder, "フォルダーを作成")
-                            }
-                            IconButton(onClick = { createNote = true }) {
-                                Icon(Icons.Default.Add, "ノートを作成")
+                            Box {
+                                IconButton(onClick = { showAddMenu = true }) {
+                                    Icon(Icons.Default.Add, "追加")
+                                }
+                                DropdownMenu(
+                                    expanded = showAddMenu,
+                                    onDismissRequest = { showAddMenu = false },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("新しいノート") },
+                                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.NoteAdd, null) },
+                                        onClick = { showAddMenu = false; createNote = true },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("新しいフォルダー") },
+                                        leadingIcon = { Icon(Icons.Default.CreateNewFolder, null) },
+                                        onClick = { showAddMenu = false; createFolder = true },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("PDFを読み込む") },
+                                        leadingIcon = { Icon(Icons.Default.PictureAsPdf, null) },
+                                        onClick = { showAddMenu = false; onImportPdf() },
+                                    )
+                                }
                             }
                             IconButton(onClick = viewModel::showTrash) {
                                 Icon(Icons.Default.DeleteOutline, "ゴミ箱")
@@ -571,13 +588,13 @@ private fun HomeScreen(
     }
 
     if (createNote) {
-        NameDialog("新しいノート", "名称未設定のノート", onDismiss = { createNote = false }) {
+        NameDialog("新しいノート", "名称未設定のノート", useDefaultName = true, onDismiss = { createNote = false }) {
             createNote = false
             viewModel.createBlankNote(it)
         }
     }
     if (createFolder) {
-        NameDialog("新しいフォルダー", "新しいフォルダー", onDismiss = { createFolder = false }) {
+        NameDialog("新しいフォルダー", "新しいフォルダー", useDefaultName = true, onDismiss = { createFolder = false }) {
             createFolder = false
             viewModel.createFolder(it)
         }
@@ -1026,6 +1043,7 @@ private enum class EditorPanel {
     SEARCH,
     AI,
     PEN,
+    HIGHLIGHTER,
     ERASER,
     LASSO,
     TEXT,
@@ -1237,13 +1255,24 @@ private fun EditorCommandBar(
             if (penSelected) {
                 onPanel(EditorPanel.PEN)
             } else {
-                if (viewModel.brushSpec.kind == BrushKind.HIGHLIGHTER) {
-                    viewModel.setBrushKind(BrushKind.PRESSURE_PEN)
-                } else {
-                    viewModel.setTool(ToolMode.PEN)
-                }
+                viewModel.selectPen()
                 onDismissPanel()
             }
+        }
+    }
+    val highlighterSelected = !readOnly && viewModel.toolMode == ToolMode.PEN &&
+        viewModel.brushSpec.kind == BrushKind.HIGHLIGHTER
+    val highlighter = CommandSpec(
+        Icons.Default.Highlight,
+        "蛍光ペン",
+        highlighterSelected,
+        enabled = !readOnly,
+    ) {
+        if (highlighterSelected) {
+            onPanel(EditorPanel.HIGHLIGHTER)
+        } else {
+            viewModel.setBrushKind(BrushKind.HIGHLIGHTER)
+            onDismissPanel()
         }
     }
     val eraserSelected = !readOnly && viewModel.toolMode == ToolMode.ERASER
@@ -1296,7 +1325,7 @@ private fun EditorCommandBar(
     val pages = CommandSpec(Icons.Default.Menu, "ページ一覧", showPages, onClick = onTogglePages)
 
     val detailBlock = listOf(undo, redo, addPage, save, details)
-    val toolsBeforeLasso = listOf(pen, eraser)
+    val toolsBeforeLasso = listOf(pen, highlighter, eraser)
     val toolsAfterLasso = listOf(image)
     val pageBlock = listOf(pages, readOnlyCommand)
 
@@ -1497,6 +1526,7 @@ private fun EditorDetailPanel(
                 EditorPanel.SEARCH -> SearchPanel()
                 EditorPanel.AI -> AiPanel(viewModel)
                 EditorPanel.PEN -> PenPanel(viewModel)
+                EditorPanel.HIGHLIGHTER -> PenPanel(viewModel, highlighter = true)
                 EditorPanel.ERASER -> Text(
                     "線単位で消去します。スタイラスの消しゴムボタンも利用できます。",
                 )
@@ -1541,6 +1571,7 @@ private fun panelTitle(panel: EditorPanel): String = when (panel) {
     EditorPanel.SEARCH -> "検索"
     EditorPanel.AI -> "AI"
     EditorPanel.PEN -> "ペン"
+    EditorPanel.HIGHLIGHTER -> "蛍光ペン"
     EditorPanel.ERASER -> "消しゴム"
     EditorPanel.LASSO -> "投げ縄"
     EditorPanel.TEXT -> "テキスト"
@@ -1596,9 +1627,9 @@ private fun FeaturePanel(title: String, description: String) {
 }
 
 @Composable
-private fun PenPanel(viewModel: MainViewModel) {
+private fun PenPanel(viewModel: MainViewModel, highlighter: Boolean = false) {
     var showCustomEditor by remember { mutableStateOf(false) }
-    val colors = listOf(
+    val colors = (if (highlighter) listOf(0xFFFFF176.toInt() to Color(0xFFFFF176)) else emptyList()) + listOf(
         0xFF111111.toInt() to Color(0xFF111111),
         0xFF1565C0.toInt() to Color(0xFF1565C0),
         0xFFC62828.toInt() to Color(0xFFC62828),
@@ -1606,32 +1637,29 @@ private fun PenPanel(viewModel: MainViewModel) {
         0xFF6A1B9A.toInt() to Color(0xFF6A1B9A),
     )
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(
-            Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            ToolChoice(
-                selected = viewModel.brushSpec.kind == BrushKind.PRESSURE_PEN,
-                icon = Icons.Default.Edit,
-                label = "筆圧ペン",
-            ) { viewModel.setBrushKind(BrushKind.PRESSURE_PEN) }
-            ToolChoice(
-                selected = viewModel.brushSpec.kind == BrushKind.MARKER,
-                icon = Icons.Default.BorderColor,
-                label = "マーカー",
-            ) { viewModel.setBrushKind(BrushKind.MARKER) }
-            ToolChoice(
-                selected = viewModel.brushSpec.kind == BrushKind.HIGHLIGHTER,
-                icon = Icons.Default.Highlight,
-                label = "蛍光ペン",
-            ) { viewModel.setBrushKind(BrushKind.HIGHLIGHTER) }
-            ToolChoice(
-                selected = viewModel.brushSpec.kind == BrushKind.CUSTOM,
-                icon = Icons.Default.Tune,
-                label = "カスタム",
+        if (!highlighter) {
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                viewModel.setBrushKind(BrushKind.CUSTOM)
-                showCustomEditor = true
+                ToolChoice(
+                    selected = viewModel.brushSpec.kind == BrushKind.PRESSURE_PEN,
+                    icon = Icons.Default.Edit,
+                    label = "筆圧ペン",
+                ) { viewModel.setBrushKind(BrushKind.PRESSURE_PEN) }
+                ToolChoice(
+                    selected = viewModel.brushSpec.kind == BrushKind.MARKER,
+                    icon = Icons.Default.BorderColor,
+                    label = "マーカー",
+                ) { viewModel.setBrushKind(BrushKind.MARKER) }
+                ToolChoice(
+                    selected = viewModel.brushSpec.kind == BrushKind.CUSTOM,
+                    icon = Icons.Default.Tune,
+                    label = "カスタム",
+                ) {
+                    viewModel.setBrushKind(BrushKind.CUSTOM)
+                    showCustomEditor = true
+                }
             }
         }
         Row(
@@ -2356,10 +2384,13 @@ private fun BrushSlider(
 private fun NameDialog(
     title: String,
     initial: String,
+    useDefaultName: Boolean = false,
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit,
 ) {
-    var value by remember { mutableStateOf(initial) }
+    var value by rememberSaveable(initial, useDefaultName) {
+        mutableStateOf(if (useDefaultName) "" else initial)
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
@@ -2368,10 +2399,11 @@ private fun NameDialog(
                 value = value,
                 onValueChange = { value = it },
                 singleLine = true,
+                placeholder = { Text(initial) },
             )
         },
         confirmButton = {
-            Button(onClick = { onConfirm(value) }) { Text("決定") }
+            Button(onClick = { onConfirm(value.trim().ifBlank { initial }) }) { Text("決定") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("キャンセル") }
