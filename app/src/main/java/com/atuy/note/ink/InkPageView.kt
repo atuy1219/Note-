@@ -327,7 +327,9 @@ class InkPageView(context: Context) : FrameLayout(context) {
         val newWidth = newRight - newLeft
         val newHeight = newBottom - newTop
         if (newLeft == renderOriginX && newTop == renderOriginY &&
-            newWidth == renderWidth && newHeight == renderHeight
+            newWidth == renderWidth && newHeight == renderHeight &&
+            dryView.measuredWidth == newWidth && dryView.measuredHeight == newHeight &&
+            wetView.measuredWidth == newWidth && wetView.measuredHeight == newHeight
         ) return
 
         renderOriginX = newLeft
