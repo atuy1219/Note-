@@ -3,6 +3,9 @@ package com.atuy.note.ui
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import com.atuy.note.data.NoteExportFormat
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -104,6 +107,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
@@ -192,7 +196,7 @@ fun EnhancedNoteApp(
         showHomeSettings = false
     }
 
-    Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface).safeDrawingPadding()) {
         AppFrame(
             viewModel = viewModel,
             uiPreferences = uiPreferences,
@@ -420,6 +424,7 @@ private fun HomeScreen(
     onOpenSettings: () -> Unit,
     snackbar: SnackbarHostState,
 ) {
+    var showAddMenu by remember { mutableStateOf(false) }
     var createNote by remember { mutableStateOf(false) }
     var createFolder by remember { mutableStateOf(false) }
     var query by rememberSaveable { mutableStateOf("") }
@@ -484,14 +489,30 @@ private fun HomeScreen(
                             IconButton(onClick = onSyncDrive) {
                                 Icon(Icons.Default.CloudSync, "Google Driveと同期")
                             }
-                            IconButton(onClick = onImportPdf) {
-                                Icon(Icons.Default.PictureAsPdf, "PDFを読み込む")
-                            }
-                            IconButton(onClick = { createFolder = true }) {
-                                Icon(Icons.Default.CreateNewFolder, "フォルダーを作成")
-                            }
-                            IconButton(onClick = { createNote = true }) {
-                                Icon(Icons.Default.Add, "ノートを作成")
+                            Box {
+                                IconButton(onClick = { showAddMenu = true }) {
+                                    Icon(Icons.Default.Add, "追加")
+                                }
+                                DropdownMenu(
+                                    expanded = showAddMenu,
+                                    onDismissRequest = { showAddMenu = false },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("新しいノート") },
+                                        leadingIcon = { Icon(Icons.AutoMirrored.Filled.NoteAdd, null) },
+                                        onClick = { showAddMenu = false; createNote = true },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("新しいフォルダー") },
+                                        leadingIcon = { Icon(Icons.Default.CreateNewFolder, null) },
+                                        onClick = { showAddMenu = false; createFolder = true },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("PDFを読み込む") },
+                                        leadingIcon = { Icon(Icons.Default.PictureAsPdf, null) },
+                                        onClick = { showAddMenu = false; onImportPdf() },
+                                    )
+                                }
                             }
                             IconButton(onClick = viewModel::showTrash) {
                                 Icon(Icons.Default.DeleteOutline, "ゴミ箱")
@@ -571,13 +592,13 @@ private fun HomeScreen(
     }
 
     if (createNote) {
-        NameDialog("新しいノート", "名称未設定のノート", onDismiss = { createNote = false }) {
+        NameDialog("新しいノート", "名称未設定のノート", useDefaultName = true, onDismiss = { createNote = false }) {
             createNote = false
             viewModel.createBlankNote(it)
         }
     }
     if (createFolder) {
-        NameDialog("新しいフォルダー", "新しいフォルダー", onDismiss = { createFolder = false }) {
+        NameDialog("新しいフォルダー", "新しいフォルダー", useDefaultName = true, onDismiss = { createFolder = false }) {
             createFolder = false
             viewModel.createFolder(it)
         }
@@ -1026,6 +1047,7 @@ private enum class EditorPanel {
     SEARCH,
     AI,
     PEN,
+    HIGHLIGHTER,
     ERASER,
     LASSO,
     TEXT,
@@ -1237,13 +1259,24 @@ private fun EditorCommandBar(
             if (penSelected) {
                 onPanel(EditorPanel.PEN)
             } else {
-                if (viewModel.brushSpec.kind == BrushKind.HIGHLIGHTER) {
-                    viewModel.setBrushKind(BrushKind.PRESSURE_PEN)
-                } else {
-                    viewModel.setTool(ToolMode.PEN)
-                }
+                viewModel.selectPen()
                 onDismissPanel()
             }
+        }
+    }
+    val highlighterSelected = !readOnly && viewModel.toolMode == ToolMode.PEN &&
+        viewModel.brushSpec.kind == BrushKind.HIGHLIGHTER
+    val highlighter = CommandSpec(
+        Icons.Default.Highlight,
+        "蛍光ペン",
+        highlighterSelected,
+        enabled = !readOnly,
+    ) {
+        if (highlighterSelected) {
+            onPanel(EditorPanel.HIGHLIGHTER)
+        } else {
+            viewModel.setBrushKind(BrushKind.HIGHLIGHTER)
+            onDismissPanel()
         }
     }
     val eraserSelected = !readOnly && viewModel.toolMode == ToolMode.ERASER
@@ -1296,7 +1329,7 @@ private fun EditorCommandBar(
     val pages = CommandSpec(Icons.Default.Menu, "ページ一覧", showPages, onClick = onTogglePages)
 
     val detailBlock = listOf(undo, redo, addPage, save, details)
-    val toolsBeforeLasso = listOf(pen, eraser)
+    val toolsBeforeLasso = listOf(pen, highlighter, eraser)
     val toolsAfterLasso = listOf(image)
     val pageBlock = listOf(pages, readOnlyCommand)
 
@@ -1497,6 +1530,7 @@ private fun EditorDetailPanel(
                 EditorPanel.SEARCH -> SearchPanel()
                 EditorPanel.AI -> AiPanel(viewModel)
                 EditorPanel.PEN -> PenPanel(viewModel)
+                EditorPanel.HIGHLIGHTER -> PenPanel(viewModel, highlighter = true)
                 EditorPanel.ERASER -> Text(
                     "線単位で消去します。スタイラスの消しゴムボタンも利用できます。",
                 )
@@ -1541,6 +1575,7 @@ private fun panelTitle(panel: EditorPanel): String = when (panel) {
     EditorPanel.SEARCH -> "検索"
     EditorPanel.AI -> "AI"
     EditorPanel.PEN -> "ペン"
+    EditorPanel.HIGHLIGHTER -> "蛍光ペン"
     EditorPanel.ERASER -> "消しゴム"
     EditorPanel.LASSO -> "投げ縄"
     EditorPanel.TEXT -> "テキスト"
@@ -1596,9 +1631,9 @@ private fun FeaturePanel(title: String, description: String) {
 }
 
 @Composable
-private fun PenPanel(viewModel: MainViewModel) {
+private fun PenPanel(viewModel: MainViewModel, highlighter: Boolean = false) {
     var showCustomEditor by remember { mutableStateOf(false) }
-    val colors = listOf(
+    val colors = (if (highlighter) listOf(0xFFFFF176.toInt() to Color(0xFFFFF176)) else emptyList()) + listOf(
         0xFF111111.toInt() to Color(0xFF111111),
         0xFF1565C0.toInt() to Color(0xFF1565C0),
         0xFFC62828.toInt() to Color(0xFFC62828),
@@ -1606,32 +1641,29 @@ private fun PenPanel(viewModel: MainViewModel) {
         0xFF6A1B9A.toInt() to Color(0xFF6A1B9A),
     )
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(
-            Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            ToolChoice(
-                selected = viewModel.brushSpec.kind == BrushKind.PRESSURE_PEN,
-                icon = Icons.Default.Edit,
-                label = "筆圧ペン",
-            ) { viewModel.setBrushKind(BrushKind.PRESSURE_PEN) }
-            ToolChoice(
-                selected = viewModel.brushSpec.kind == BrushKind.MARKER,
-                icon = Icons.Default.BorderColor,
-                label = "マーカー",
-            ) { viewModel.setBrushKind(BrushKind.MARKER) }
-            ToolChoice(
-                selected = viewModel.brushSpec.kind == BrushKind.HIGHLIGHTER,
-                icon = Icons.Default.Highlight,
-                label = "蛍光ペン",
-            ) { viewModel.setBrushKind(BrushKind.HIGHLIGHTER) }
-            ToolChoice(
-                selected = viewModel.brushSpec.kind == BrushKind.CUSTOM,
-                icon = Icons.Default.Tune,
-                label = "カスタム",
+        if (!highlighter) {
+            Row(
+                Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                viewModel.setBrushKind(BrushKind.CUSTOM)
-                showCustomEditor = true
+                ToolChoice(
+                    selected = viewModel.brushSpec.kind == BrushKind.PRESSURE_PEN,
+                    icon = Icons.Default.Edit,
+                    label = "筆圧ペン",
+                ) { viewModel.setBrushKind(BrushKind.PRESSURE_PEN) }
+                ToolChoice(
+                    selected = viewModel.brushSpec.kind == BrushKind.MARKER,
+                    icon = Icons.Default.BorderColor,
+                    label = "マーカー",
+                ) { viewModel.setBrushKind(BrushKind.MARKER) }
+                ToolChoice(
+                    selected = viewModel.brushSpec.kind == BrushKind.CUSTOM,
+                    icon = Icons.Default.Tune,
+                    label = "カスタム",
+                ) {
+                    viewModel.setBrushKind(BrushKind.CUSTOM)
+                    showCustomEditor = true
+                }
             }
         }
         Row(
@@ -1785,6 +1817,18 @@ private fun DetailsPanel(
     onRename: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    val pdfExport = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(NoteExportFormat.PDF.mimeType),
+        viewModel::completeExport,
+    )
+    val pngExport = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(NoteExportFormat.PNG.mimeType),
+        viewModel::completeExport,
+    )
+    val zipExport = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument(NoteExportFormat.PNG_ZIP.mimeType),
+        viewModel::completeExport,
+    )
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("ページ", style = MaterialTheme.typography.titleSmall)
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1808,6 +1852,24 @@ private fun DetailsPanel(
         HorizontalDivider()
         Text("ツールバー位置", style = MaterialTheme.typography.titleSmall)
         DockChoices(uiPreferences)
+        HorizontalDivider()
+        Text("エクスポート", style = MaterialTheme.typography.titleSmall)
+        Text("手書き・配置画像・PDF背景を含めて書き出します。", style = MaterialTheme.typography.bodySmall)
+        Button(
+            enabled = !viewModel.busy,
+            onClick = { viewModel.beginExport(NoteExportFormat.PDF)?.let(pdfExport::launch) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("全ページをPDFで保存") }
+        OutlinedButton(
+            enabled = !viewModel.busy,
+            onClick = { viewModel.beginExport(NoteExportFormat.PNG)?.let(pngExport::launch) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("現在のページを画像（PNG）で保存") }
+        OutlinedButton(
+            enabled = !viewModel.busy,
+            onClick = { viewModel.beginExport(NoteExportFormat.PNG_ZIP)?.let(zipExport::launch) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("全ページの画像をZIPで保存") }
         HorizontalDivider()
         Button(onClick = onRename, modifier = Modifier.fillMaxWidth()) {
             Icon(Icons.Default.Edit, null)
@@ -2356,10 +2418,13 @@ private fun BrushSlider(
 private fun NameDialog(
     title: String,
     initial: String,
+    useDefaultName: Boolean = false,
     onDismiss: () -> Unit,
     onConfirm: (String) -> Unit,
 ) {
-    var value by remember { mutableStateOf(initial) }
+    var value by rememberSaveable(initial, useDefaultName) {
+        mutableStateOf(if (useDefaultName) "" else initial)
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
@@ -2368,10 +2433,11 @@ private fun NameDialog(
                 value = value,
                 onValueChange = { value = it },
                 singleLine = true,
+                placeholder = { Text(initial) },
             )
         },
         confirmButton = {
-            Button(onClick = { onConfirm(value) }) { Text("決定") }
+            Button(onClick = { onConfirm(value.trim().ifBlank { initial }) }) { Text("決定") }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("キャンセル") }
