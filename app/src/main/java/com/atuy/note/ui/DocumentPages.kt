@@ -153,7 +153,11 @@ internal fun DocumentPages(
         val viewportCross = with(density) { if (vertical) maxWidth.toPx() else maxHeight.toPx() }
         val viewportCenter = Offset(with(density) { maxWidth.toPx() } / 2f, with(density) { maxHeight.toPx() } / 2f)
         val gapPx = with(density) { DOCUMENT_PAGE_GAP.toPx() }
-        val tallestRatio = session.pages.maxOf { it.height / it.width }
+        // A page's width/height never changes after creation. Reordering pages does not
+        // affect the maximum. Recompute only when the document/page count changes.
+        val tallestRatio = remember(session.id, session.pages.size) {
+            session.pages.maxOf { it.height / it.width }
+        }
         fun crossContentSize(width: Float): Float = maxOf(
             if (vertical) width else pagePixels(width) * tallestRatio + gapPx * 2,
             viewportCross,
