@@ -115,6 +115,8 @@ data class StoredStroke(
     val encodedInputs: String? = null,
     @EncodeDefault(EncodeDefault.Mode.NEVER)
     val samples: List<InkSample> = emptyList(),
+    // Replayable mesh cut operations; Ink 1.1 cannot serialize PartitionedMesh.
+    val meshErases: List<MeshErasePath> = emptyList(),
 )
 
 @Serializable
@@ -156,6 +158,7 @@ data class BrushSpec(
 enum class BrushKind { PRESSURE_PEN, MARKER, HIGHLIGHTER, CUSTOM }
 
 enum class ToolMode { PEN, ERASER, LASSO, IMAGE }
+enum class EraserMode { STROKE, MESH }
 enum class ScrollAxis { VERTICAL, HORIZONTAL }
 enum class NavigationGestureMode { ONE_FINGER, TWO_FINGER }
 enum class LassoCoverageMode(val minimumCoverage: Float) {
@@ -259,6 +262,32 @@ class PageSession(
     }
 
     fun eraseAt(x: Float, y: Float, radius: Float): Boolean = eraseWholeStrokes(x, y, radius)
+
+    /** Publish an intermediate mesh result without adding an Undo entry for every move. */
+    fun previewMeshErase(expectedVersion: Int, after: List<RuntimeStroke>): Boolean {
+        if (contentVersion != expectedVersion) return false
+        val same = strokes.size == after.size &&
+            strokes.indices.all { strokes[it] === after[it] }
+        if (!same) replaceAllStrokes(after)
+        return true
+    }
+
+    /** Clear only Note-'s annotations; the PDF itself and its pages remain intact. */
+    fun clearMarkups(includePlacedImages: Boolean = true): Boolean {
+        val oldStrokes = strokes.toList()
+        val oldImages = images.toList()
+        if (oldStrokes.isEmpty() && (!includePlacedImages || oldImages.isEmpty())) return false
+        if (oldStrokes.isNotEmpty()) replaceAllStrokes(emptyList())
+        if (includePlacedImages && oldImages.isNotEmpty()) {
+            images.clear()
+            selectedImageId = null
+            contentVersion++
+        }
+        selectedStrokeIds.clear()
+        undoStack.add(InkOperation.ClearMarkups(oldStrokes, if (includePlacedImages) oldImages else null))
+        redoStack.clear()
+        return true
+    }
 
     fun endEraseGesture(): Boolean {
         val before = eraseGestureBefore ?: return false
@@ -507,6 +536,10 @@ class PageSession(
     fun undo(): Boolean {
         val op = undoStack.removeLastOrNull() ?: return false
         when (op) {
+            is InkOperation.ClearMarkups -> {
+                replaceAllStrokes(op.strokes)
+                op.images?.let { images.clear(); images.addAll(it); selectedImageId = null }
+            }
             is InkOperation.AddStroke -> strokes.remove(op.stroke)
             is InkOperation.ReplaceStrokes -> replaceAllStrokes(op.before)
             is InkOperation.AddImage -> {
@@ -524,6 +557,10 @@ class PageSession(
     fun redo(): Boolean {
         val op = redoStack.removeLastOrNull() ?: return false
         when (op) {
+            is InkOperation.ClearMarkups -> {
+                replaceAllStrokes(emptyList())
+                if (op.images != null) { images.clear(); selectedImageId = null }
+            }
             is InkOperation.AddStroke -> strokes.add(op.stroke)
             is InkOperation.ReplaceStrokes -> replaceAllStrokes(op.after)
             is InkOperation.AddImage -> images.add(op.image)
@@ -577,6 +614,10 @@ class PageSession(
 }
 
 private sealed interface InkOperation {
+    data class ClearMarkups(
+        val strokes: List<RuntimeStroke>,
+        val images: List<PageImage>?,
+    ) : InkOperation
     data class AddStroke(val stroke: RuntimeStroke) : InkOperation
     data class ReplaceStrokes(val before: List<RuntimeStroke>, val after: List<RuntimeStroke>) : InkOperation
     data class AddImage(val image: PageImage) : InkOperation
@@ -734,12 +775,17 @@ fun StoredStroke.toRuntimeOrNull(officialBytes: ByteArray?): RuntimeStroke? = ru
         samples = emptyList(),
     )
     val runtimeSamples = if (samples.isNotEmpty()) samples else decoded.toInkSamples()
-    RuntimeStroke(normalized, Stroke(brush.toBrush(), decoded), runtimeSamples)
+    val original = Stroke(brush.toBrush(), decoded)
+    RuntimeStroke(normalized, MeshEraser.replay(original, meshErases), runtimeSamples)
 }.getOrNull()
 
 private fun RuntimeStroke.withBrush(spec: BrushSpec): RuntimeStroke {
     val metadata = stored.copy(brush = spec)
-    return RuntimeStroke(metadata, Stroke(spec.toBrush(), stroke.inputs), samples)
+    return RuntimeStroke(
+        metadata,
+        MeshEraser.replay(Stroke(spec.toBrush(), stroke.inputs), metadata.meshErases),
+        samples,
+    )
 }
 
 private fun RuntimeStroke.transformed(
@@ -766,8 +812,15 @@ private fun RuntimeStroke.transformed(
         )
     }
     batch.setNoiseSeed(stroke.inputs.getNoiseSeed())
-    val nextStroke = Stroke(stored.brush.toBrush(), batch)
-    return RuntimeStroke(stored, nextStroke)
+    val movedCuts = MeshEraser.transformCuts(
+        stored.meshErases, dx, dy, scale, centerX, centerY,
+    )
+    val metadata = stored.copy(meshErases = movedCuts)
+    val nextStroke = MeshEraser.replay(
+        Stroke(stored.brush.toBrush(), batch),
+        movedCuts,
+    )
+    return RuntimeStroke(metadata, nextStroke)
 }
 
 fun StrokeInputBatch.toInkSamples(): List<InkSample> = List(size) { index ->
