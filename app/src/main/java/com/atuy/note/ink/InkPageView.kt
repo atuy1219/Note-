@@ -163,10 +163,19 @@ class InkPageView(context: Context) : FrameLayout(context) {
         isFocusableInTouchMode = true
         wetView.isClickable = false
         wetView.isFocusable = false
+        // AndroidX Ink 1.1 V33 can dispatch a buffered-render completion on an old
+        // HandlerThread after a SurfaceView detaches and reattaches (as happens with
+        // recycled pages in a LazyColumn / LazyRow). Its assertion then compares
+        // that callback against the newly-created render thread and crashes.
+        // V29 uses the compatible low-latency path without that V33 executor race.
+        // This choice MUST precede the first startStroke() or eagerInit().
+        @Suppress("DEPRECATION")
+        wetView.useNewTPlusRenderHelper = false
         // Ink receives the same raw MotionEvents as this exactly-overlaid view.
         wetView.motionEventToViewTransform = wetLayerTransform
         scaleDetector.isQuickScaleEnabled = false
-        post { wetView.eagerInit() }
+        // No eagerInit(): pages offscreen or briefly composed during spread navigation
+        // must not acquire render threads or SurfaceViews until actually inked.
         wetView.addFinishedStrokesListener(object : InProgressStrokesFinishedListener {
             override fun onStrokesFinished(strokes: Map<InProgressStrokeId, Stroke>) {
                 strokes.forEach { (id, stroke) ->
