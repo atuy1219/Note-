@@ -10,9 +10,11 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PointF
 import android.graphics.RectF
+import android.graphics.Rect
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.view.ViewTreeObserver
 import android.widget.FrameLayout
 import androidx.ink.authoring.InProgressStrokeId
 import androidx.ink.authoring.InProgressStrokesFinishedListener
@@ -33,10 +35,25 @@ import com.atuy.note.data.toRuntimeStroke
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.floor
+import java.util.IdentityHashMap
 
 class InkPageView(context: Context) : FrameLayout(context) {
     private val dryView = DryInkView(context)
     private val wetView = InProgressStrokesView(context)
+    // The parent retains virtual page coordinates; the children render only visible pixels.
+    private val visibleLayerBounds = Rect()
+    private val wetLayerTransform = Matrix()
+    private var renderOriginX = 0
+    private var renderOriginY = 0
+    private var renderWidth = 0
+    private var renderHeight = 0
+    private val visibleLayerListener = ViewTreeObserver.OnPreDrawListener {
+        updateVisibleLayerBounds()
+        true
+    }
+    private var boundSelectedImageId: String? = null
+    private var boundToolMode: ToolMode? = null
     private val predictor = MotionEventPredictor.newInstance(this)
     private var scaleGestureInProgress = false
     private val scaleDetector = ScaleGestureDetector(
@@ -139,14 +156,15 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private var touchGestureActive = false
 
     init {
-        setWillNotDraw(false)
-        addView(dryView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-        addView(wetView, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        // Avoid a giant parent display list and 25x-size wet/dry surfaces at 500% zoom.
+        setWillNotDraw(true)
+        addView(dryView, LayoutParams(1, 1))
+        addView(wetView, LayoutParams(1, 1))
         isFocusableInTouchMode = true
         wetView.isClickable = false
         wetView.isFocusable = false
         // Ink receives the same raw MotionEvents as this exactly-overlaid view.
-        wetView.motionEventToViewTransform = Matrix()
+        wetView.motionEventToViewTransform = wetLayerTransform
         scaleDetector.isQuickScaleEnabled = false
         post { wetView.eagerInit() }
         wetView.addFinishedStrokesListener(object : InProgressStrokesFinishedListener {
@@ -179,6 +197,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
                     pendingFinishedStrokeIds.removeAll(finishedIds)
                     onAuthoringChanged(pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty())
                     flushPendingViewportMutations()
+                    updateVisibleLayerBounds()
                     dryView.postInvalidateOnAnimation()
                 }
             }
@@ -250,17 +269,82 @@ class InkPageView(context: Context) : FrameLayout(context) {
         this.onImageTransformCancel = onImageTransformCancel
         this.onActivated = onActivated
         this.onAuthoringChanged = onAuthoringChanged
+        val backgroundChanged = dryView.backgroundBitmap !== background
+        val imagesChanged = dryView.imageBitmaps !== imageBitmaps
+        val selectedImageChanged = boundSelectedImageId != page.selectedImageId
+        val newToolMode = toolProvider()
+        val toolChanged = boundToolMode != newToolMode
         dryView.page = page
         dryView.backgroundBitmap = background
         dryView.imageBitmaps = imageBitmaps
         dryView.toolProvider = toolProvider
+        boundSelectedImageId = page.selectedImageId
+        boundToolMode = newToolMode
         updateViewportMatrices()
-        if (boundContentVersion != contentVersion) {
+        if (boundContentVersion != contentVersion || backgroundChanged || imagesChanged ||
+            selectedImageChanged || toolChanged
+        ) {
             boundContentVersion = contentVersion
             dryView.postInvalidateOnAnimation()
-        } else {
-            dryView.invalidate()
         }
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        viewTreeObserver.addOnPreDrawListener(visibleLayerListener)
+    }
+
+    override fun onDetachedFromWindow() {
+        if (viewTreeObserver.isAlive) {
+            viewTreeObserver.removeOnPreDrawListener(visibleLayerListener)
+        }
+        super.onDetachedFromWindow()
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        // A zoomed page can be huge, but its ink layers must remain screen-sized.
+        updateVisibleLayerBounds()
+    }
+
+    private fun updateVisibleLayerBounds() {
+        if (width <= 0 || height <= 0) return
+        // Keep transforms stable until the wet stroke has been committed to dry ink.
+        if ((pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty()) &&
+            renderWidth > 0 && renderHeight > 0
+        ) return
+
+        val visible = getLocalVisibleRect(visibleLayerBounds)
+        if (!visible) visibleLayerBounds.set(0, 0, 1, 1)
+        val maxWidth = rootView.width.coerceAtLeast(1)
+        val maxHeight = rootView.height.coerceAtLeast(1)
+        val overscan = 24
+        val newLeft = (visibleLayerBounds.left - overscan).coerceIn(0, width - 1)
+        val newTop = (visibleLayerBounds.top - overscan).coerceIn(0, height - 1)
+        val newRight = (visibleLayerBounds.right + overscan)
+            .coerceIn(newLeft + 1, min(width, newLeft + maxWidth))
+        val newBottom = (visibleLayerBounds.bottom + overscan)
+            .coerceIn(newTop + 1, min(height, newTop + maxHeight))
+        val newWidth = newRight - newLeft
+        val newHeight = newBottom - newTop
+        if (newLeft == renderOriginX && newTop == renderOriginY &&
+            newWidth == renderWidth && newHeight == renderHeight &&
+            dryView.measuredWidth == newWidth && dryView.measuredHeight == newHeight &&
+            wetView.measuredWidth == newWidth && wetView.measuredHeight == newHeight
+        ) return
+
+        renderOriginX = newLeft
+        renderOriginY = newTop
+        renderWidth = newWidth
+        renderHeight = newHeight
+        val wSpec = MeasureSpec.makeMeasureSpec(newWidth, MeasureSpec.EXACTLY)
+        val hSpec = MeasureSpec.makeMeasureSpec(newHeight, MeasureSpec.EXACTLY)
+        dryView.measure(wSpec, hSpec)
+        wetView.measure(wSpec, hSpec)
+        dryView.layout(newLeft, newTop, newRight, newBottom)
+        wetView.layout(newLeft, newTop, newRight, newBottom)
+        wetLayerTransform.setTranslate(-newLeft.toFloat(), -newTop.toFloat())
+        wetView.motionEventToViewTransform = wetLayerTransform
+        dryView.postInvalidateOnAnimation()
     }
 
     override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
@@ -915,6 +999,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
         const val MAX_CIRCLE_GAP = 28f
         const val MAX_CIRCLE_GAP_RATIO = 0.24f
         const val MIN_CIRCLE_PATH_RATIO = 1.15f
+        const val STROKE_CELL_SIZE = 128f
+        const val MAX_CELLS_PER_STROKE = 64
     }
 
     private inner class DryInkView(context: Context) : View(context) {
@@ -934,10 +1020,88 @@ class InkPageView(context: Context) : FrameLayout(context) {
         var imageBitmaps: Map<String, Bitmap> = emptyMap()
         var toolProvider: () -> ToolMode = { ToolMode.PEN }
 
+        // Cache stroke geometry across edits and bin bounds for viewport queries.
+        private val cachedBounds = IdentityHashMap<RuntimeStroke, RectF>()
+        private val cells = HashMap<Long, MutableList<Int>>()
+        private val spanningStrokes = ArrayList<Int>()
+        private val indexedBounds = ArrayList<RectF?>()
+        private var indexedPage: PageSession? = null
+        private var indexedVersion = -1
+
+        private fun rebuildIndexIfNeeded(current: PageSession) {
+            if (indexedPage === current && indexedVersion == current.contentVersion) return
+            if (indexedPage !== current) cachedBounds.clear()
+            indexedPage = current
+            indexedVersion = current.contentVersion
+            cells.clear()
+            spanningStrokes.clear()
+            indexedBounds.clear()
+            val retained = IdentityHashMap<RuntimeStroke, RectF>()
+            current.strokes.forEachIndexed { index, runtime ->
+                val bounds = cachedBounds[runtime] ?: runtime.stroke.shape.computeBoundingBox()?.let {
+                    val pad = max(1f, runtime.stored.brush.size * 1.5f)
+                    RectF(it.xMin - pad, it.yMin - pad, it.xMax + pad, it.yMax + pad)
+                }
+                if (bounds == null) {
+                    indexedBounds.add(null)
+                    spanningStrokes.add(index)
+                    return@forEachIndexed
+                }
+                retained[runtime] = bounds
+                indexedBounds.add(bounds)
+                val left = floor(bounds.left / STROKE_CELL_SIZE).toInt()
+                val top = floor(bounds.top / STROKE_CELL_SIZE).toInt()
+                val right = floor(bounds.right / STROKE_CELL_SIZE).toInt()
+                val bottom = floor(bounds.bottom / STROKE_CELL_SIZE).toInt()
+                val count = (right.toLong() - left + 1) * (bottom.toLong() - top + 1)
+                if (count > MAX_CELLS_PER_STROKE) {
+                    spanningStrokes.add(index)
+                } else {
+                    for (y in top..bottom) {
+                        for (x in left..right) {
+                            cells.getOrPut(cellKey(x, y)) { ArrayList() }.add(index)
+                        }
+                    }
+                }
+            }
+            cachedBounds.clear()
+            cachedBounds.putAll(retained)
+        }
+
+        private fun findVisibleStrokeIndices(current: PageSession): List<Int> {
+            rebuildIndexIfNeeded(current)
+            if (current.strokes.isEmpty()) return emptyList()
+            val visibleWorld = RectF(
+                renderOriginX.toFloat(), renderOriginY.toFloat(),
+                (renderOriginX + width).toFloat(), (renderOriginY + height).toFloat(),
+            )
+            viewToWorld.mapRect(visibleWorld)
+            val left = floor(visibleWorld.left / STROKE_CELL_SIZE).toInt()
+            val top = floor(visibleWorld.top / STROKE_CELL_SIZE).toInt()
+            val right = floor(visibleWorld.right / STROKE_CELL_SIZE).toInt()
+            val bottom = floor(visibleWorld.bottom / STROKE_CELL_SIZE).toInt()
+            val candidates = HashSet<Int>()
+            candidates.addAll(spanningStrokes)
+            for (y in top..bottom) {
+                for (x in left..right) {
+                    cells[cellKey(x, y)]?.let(candidates::addAll)
+                }
+            }
+            return candidates.asSequence()
+                .filter { indexedBounds[it]?.let { box -> RectF.intersects(box, visibleWorld) } ?: true }
+                .sorted() // Preserve z-order for transparent brushes and highlighters.
+                .toList()
+        }
+
+        private fun cellKey(x: Int, y: Int): Long =
+            (x.toLong() shl 32) or (y.toLong() and 0xffffffffL)
+
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), outsidePaint)
             val current = page ?: return
+            canvas.save()
+            canvas.translate(-renderOriginX.toFloat(), -renderOriginY.toFloat())
             updateViewportMatrices()
             transform.set(worldToView)
 
@@ -960,7 +1124,9 @@ class InkPageView(context: Context) : FrameLayout(context) {
             }
             // CanvasStrokeRenderer only uses this argument to understand screen-space scale; the
             // Canvas must already contain the same transform used for the PDF and page images.
-            current.strokes.forEach { renderer.draw(canvas, it.stroke, transform) }
+            for (index in findVisibleStrokeIndices(current)) {
+                renderer.draw(canvas, current.strokes[index].stroke, transform)
+            }
             canvas.restore()
 
             if (toolProvider() == ToolMode.LASSO) {
@@ -987,6 +1153,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
                     }
                 }
             }
+            canvas.restore()
         }
     }
 }
