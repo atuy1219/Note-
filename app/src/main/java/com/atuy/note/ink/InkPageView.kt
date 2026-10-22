@@ -15,6 +15,7 @@ import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewTreeObserver
+import android.util.Log
 import android.widget.FrameLayout
 import androidx.ink.authoring.InProgressStrokeId
 import androidx.ink.authoring.InProgressStrokesFinishedListener
@@ -86,6 +87,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
 
     private val pointerStrokes = mutableMapOf<Int, InProgressStrokeId>()
     private val pendingFinishedStrokeIds = mutableSetOf<InProgressStrokeId>()
+    private val pendingFinishWatchdogs = mutableMapOf<InProgressStrokeId, Runnable>()
     private val pendingViewportMutations = ArrayDeque<ViewportMutation>()
     private val strokeBrushSpecs = mutableMapOf<InProgressStrokeId, BrushSpec>()
     private val lassoStrokeIds = mutableSetOf<InProgressStrokeId>()
@@ -193,6 +195,9 @@ class InkPageView(context: Context) : FrameLayout(context) {
                     }
                 }
                 val finishedIds = strokes.keys.toSet()
+                finishedIds.forEach { id ->
+                    pendingFinishWatchdogs.remove(id)?.let(::removeCallbacks)
+                }
                 // Keep the wet copy until the frame in which the newly committed dry stroke is drawn.
                 // Camera mutations are deferred during this handoff so both layers always share one view.
                 dryView.postInvalidateOnAnimation()
@@ -200,13 +205,37 @@ class InkPageView(context: Context) : FrameLayout(context) {
                     // Use the originating overlay even if this page has since been detached.
                     overlay.removeFinishedStrokes(finishedIds)
                     pendingFinishedStrokeIds.removeAll(finishedIds)
-                    onAuthoringChanged(pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty())
+                    // A stylus-up event, not the asynchronous renderer handoff,
+                    // controls whether touch navigation is blocked.
+                    onAuthoringChanged(pointerStrokes.isNotEmpty())
                     flushPendingViewportMutations()
                     updateVisibleLayerBounds()
                     dryView.postInvalidateOnAnimation()
                 }
             }
         })
+    }
+
+    private fun watchStrokeFinish(id: InProgressStrokeId) {
+        // AndroidX Ink's finished-stroke callback depends on a live render surface.
+        // Never allow an unavailable render callback to freeze the page camera forever.
+        val watchdog = Runnable {
+            pendingFinishWatchdogs.remove(id)
+            if (pendingFinishedStrokeIds.remove(id)) {
+                Log.w(TAG, "Ink finalization timed out; unlocking viewport for stroke $id")
+                onAuthoringChanged(pointerStrokes.isNotEmpty())
+                flushPendingViewportMutations()
+                updateVisibleLayerBounds()
+                dryView.postInvalidateOnAnimation()
+            }
+        }
+        pendingFinishWatchdogs[id] = watchdog
+        postDelayed(watchdog, FINISH_WATCHDOG_MS)
+    }
+
+    private fun cancelFinishWatchdogs() {
+        pendingFinishWatchdogs.values.forEach(::removeCallbacks)
+        pendingFinishWatchdogs.clear()
     }
 
     private fun replaceDetachedWetOverlay() {
@@ -223,6 +252,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         renderWidth = 0
         renderHeight = 0
         if (pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty()) {
+            cancelFinishWatchdogs()
             pointerStrokes.clear()
             pendingFinishedStrokeIds.clear()
             strokeBrushSpecs.clear()
@@ -333,6 +363,10 @@ class InkPageView(context: Context) : FrameLayout(context) {
             viewTreeObserver.removeOnPreDrawListener(visibleLayerListener)
         }
         wetOverlayWasDetached = true
+        // Lazy list recycling can suppress the after-draw completion callback.
+        // Release document-level navigation regardless of the old renderer state.
+        onAuthoringChanged(false)
+        cancelFinishWatchdogs()
         super.onDetachedFromWindow()
     }
 
@@ -704,7 +738,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         finishEraserGesture()
         touchGestureActive = false
         scaleGestureInProgress = false
-        onAuthoringChanged(pendingFinishedStrokeIds.isNotEmpty())
+        onAuthoringChanged(false)
         releaseParentIntercept()
         dryView.postInvalidateOnAnimation()
     }
@@ -805,8 +839,13 @@ class InkPageView(context: Context) : FrameLayout(context) {
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
                 pointerStrokes.remove(pointerId)?.let { id ->
                     pendingFinishedStrokeIds += id
+                    watchStrokeFinish(id)
                     wetView.finishStroke(event, pointerId, id)
                 }
+                // Previously navigation stayed blocked until onStrokesFinished.
+                // That callback can be indefinitely delayed on V33 or offscreen
+                // surfaces, effectively disabling touch/pinch after the first pen.
+                onAuthoringChanged(pointerStrokes.isNotEmpty())
                 releaseParentIntercept()
                 true
             }
@@ -815,7 +854,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 pointerStrokes.clear()
                 strokeBrushSpecs.clear()
                 lassoStrokeIds.clear()
-                onAuthoringChanged(pendingFinishedStrokeIds.isNotEmpty())
+                onAuthoringChanged(false)
                 releaseParentIntercept()
                 true
             }
@@ -1034,6 +1073,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
         const val MAX_CIRCLE_GAP = 28f
         const val MAX_CIRCLE_GAP_RATIO = 0.24f
         const val MIN_CIRCLE_PATH_RATIO = 1.15f
+        const val FINISH_WATCHDOG_MS = 1500L
+        const val TAG = "NoteInkPage"
         const val STROKE_CELL_SIZE = 128f
         const val MAX_CELLS_PER_STROKE = 64
     }
