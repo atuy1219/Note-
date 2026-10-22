@@ -1294,30 +1294,42 @@ class InkPageView(context: Context) : FrameLayout(context) {
         private val cells = HashMap<Long, MutableList<Int>>()
         private val spanningStrokes = ArrayList<Int>()
         private val indexedBounds = ArrayList<RectF?>()
+        private val indexedStrokes = ArrayList<RuntimeStroke>()
         private var indexedPage: PageSession? = null
         private var indexedVersion = -1
 
         private fun rebuildIndexIfNeeded(current: PageSession) {
-            if (indexedPage === current && indexedVersion == current.contentVersion) return
-            if (indexedPage !== current) cachedBounds.clear()
-            indexedPage = current
-            indexedVersion = current.contentVersion
-            cells.clear()
-            spanningStrokes.clear()
-            indexedBounds.clear()
-            val retained = IdentityHashMap<RuntimeStroke, RectF>()
-            current.strokes.forEachIndexed { index, runtime ->
+            if (indexedPage === current && indexedVersion == current.contentVersion &&
+                indexedStrokes.size == current.strokes.size
+            ) return
+
+            // Appending a pen stroke is the common case. Preserve all cached bounds and
+            // spatial bins rather than re-building O(totalStrokes) geometry on every up.
+            val appendOnly = indexedPage === current &&
+                current.strokes.size >= indexedStrokes.size &&
+                indexedStrokes.indices.all { indexedStrokes[it] === current.strokes[it] }
+
+            if (!appendOnly) {
+                cachedBounds.clear()
+                cells.clear()
+                spanningStrokes.clear()
+                indexedBounds.clear()
+                indexedStrokes.clear()
+            }
+            val start = indexedStrokes.size
+            for (index in start until current.strokes.size) {
+                val runtime = current.strokes[index]
                 val bounds = cachedBounds[runtime] ?: runtime.stroke.shape.computeBoundingBox()?.let {
                     val pad = max(1f, runtime.stored.brush.size * 1.5f)
                     RectF(it.xMin - pad, it.yMin - pad, it.xMax + pad, it.yMax + pad)
                 }
-                if (bounds == null) {
-                    indexedBounds.add(null)
-                    spanningStrokes.add(index)
-                    return@forEachIndexed
-                }
-                retained[runtime] = bounds
+                indexedStrokes.add(runtime)
                 indexedBounds.add(bounds)
+                if (bounds == null) {
+                    spanningStrokes.add(index)
+                    continue
+                }
+                cachedBounds[runtime] = bounds
                 val left = floor(bounds.left / STROKE_CELL_SIZE).toInt()
                 val top = floor(bounds.top / STROKE_CELL_SIZE).toInt()
                 val right = floor(bounds.right / STROKE_CELL_SIZE).toInt()
@@ -1333,8 +1345,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
                     }
                 }
             }
-            cachedBounds.clear()
-            cachedBounds.putAll(retained)
+            indexedPage = current
+            indexedVersion = current.contentVersion
         }
 
         private fun findVisibleStrokeIndices(current: PageSession): List<Int> {
