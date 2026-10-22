@@ -24,7 +24,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -119,7 +118,7 @@ internal fun DocumentPages(
         }
     }
     val visibleCallback by rememberUpdatedState(onVisiblePage)
-    LaunchedEffect(mainState) {
+    LaunchedEffect(mainState, facingPages) {
         snapshotFlow {
             val layout = mainState.layoutInfo
             layout.visibleItemsInfo.maxByOrNull { item ->
@@ -135,7 +134,7 @@ internal fun DocumentPages(
         val baseWidth = (maxWidth - DOCUMENT_PAGE_GAP * 2)
             .coerceIn(1.dp, if (facingPages) 1800.dp else 900.dp)
         val spreadWidth = baseWidth * zoom
-        val pageWidth = if (facingPages) (spreadWidth - DOCUMENT_SPREAD_GUTTER) / 2 else spreadWidth
+        val pageWidth = if (facingPages) ((spreadWidth - DOCUMENT_SPREAD_GUTTER) / 2).coerceAtLeast(1.dp) else spreadWidth
         val spreadWidthPx = with(density) { spreadWidth.toPx() }
         val baseWidthPx = with(density) { baseWidth.toPx() }
         val gutterPx = with(density) { DOCUMENT_SPREAD_GUTTER.toPx() }
