@@ -21,11 +21,15 @@ import androidx.ink.authoring.InProgressStrokeId
 import androidx.ink.authoring.InProgressStrokesFinishedListener
 import androidx.ink.authoring.InProgressStrokesView
 import androidx.ink.brush.Brush
+import androidx.ink.brush.InputToolType
 import androidx.ink.brush.StockBrushes
 import androidx.ink.rendering.android.canvas.CanvasStrokeRenderer
 import androidx.ink.strokes.Stroke
+import androidx.ink.strokes.MutableStrokeInputBatch
+import androidx.ink.strokes.StrokeInput
 import androidx.input.motionprediction.MotionEventPredictor
 import com.atuy.note.data.BrushSpec
+import com.atuy.note.data.BrushKind
 import com.atuy.note.data.InkSample
 import com.atuy.note.data.NavigationGestureMode
 import com.atuy.note.data.PageSession
@@ -33,6 +37,7 @@ import com.atuy.note.data.RuntimeStroke
 import com.atuy.note.data.ToolMode
 import com.atuy.note.data.toBrush
 import com.atuy.note.data.toRuntimeStroke
+import com.atuy.note.data.toInkSamples
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -88,6 +93,23 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private val pointerStrokes = mutableMapOf<Int, InProgressStrokeId>()
     private val pendingFinishedStrokeIds = mutableSetOf<InProgressStrokeId>()
     private val pendingFinishWatchdogs = mutableMapOf<InProgressStrokeId, Runnable>()
+
+    // Large PDFs use a local handwriting preview, independent of V33 front-buffer
+    // startup and asynchronous hardware-buffer completion. The finalized stroke
+    // is still an ordinary AndroidX Ink Stroke saved in the existing note format.
+    private class PdfLiveStroke(
+        val brush: BrushSpec,
+        val lasso: Boolean,
+        val startedAt: Long,
+    ) {
+        val inputs = MutableStrokeInputBatch()
+        val path = Path()
+        var pointCount = 0
+        var lastX = 0f
+        var lastY = 0f
+        var lastElapsedTime = 0L
+    }
+    private val pdfLiveStrokes = mutableMapOf<Int, PdfLiveStroke>()
     private val pendingViewportMutations = ArrayDeque<ViewportMutation>()
     private val strokeBrushSpecs = mutableMapOf<InProgressStrokeId, BrushSpec>()
     private val lassoStrokeIds = mutableSetOf<InProgressStrokeId>()
@@ -251,7 +273,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
         addView(newOverlay, LayoutParams(1, 1))
         renderWidth = 0
         renderHeight = 0
-        if (pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty()) {
+        if (pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty() || pdfLiveStrokes.isNotEmpty()) {
+            pdfLiveStrokes.clear()
             cancelFinishWatchdogs()
             pointerStrokes.clear()
             pendingFinishedStrokeIds.clear()
@@ -366,6 +389,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         // Lazy list recycling can suppress the after-draw completion callback.
         // Release document-level navigation regardless of the old renderer state.
         onAuthoringChanged(false)
+        pdfLiveStrokes.clear()
         cancelFinishWatchdogs()
         super.onDetachedFromWindow()
     }
@@ -378,7 +402,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private fun updateVisibleLayerBounds() {
         if (width <= 0 || height <= 0) return
         // Keep transforms stable until the wet stroke has been committed to dry ink.
-        if ((pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty()) &&
+        if ((pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty() ||
+                pdfLiveStrokes.isNotEmpty()) &&
             renderWidth > 0 && renderHeight > 0
         ) return
 
@@ -457,6 +482,10 @@ class InkPageView(context: Context) : FrameLayout(context) {
         val actionIsStylus = actionToolType == MotionEvent.TOOL_TYPE_STYLUS ||
             actionToolType == MotionEvent.TOOL_TYPE_ERASER
 
+        if (actionIsStylus && pdfLiveStrokes.containsKey(event.getPointerId(routedIndex))) {
+            val live = pdfLiveStrokes[event.getPointerId(routedIndex)]!!
+            return handlePdfLiveStroke(event, routedIndex, live.brush, live.lasso)
+        }
         if (actionIsStylus && pointerStrokes.containsKey(event.getPointerId(routedIndex))) {
             return handleAuthoredStroke(event, routedIndex, brushProvider().toBrush(), false)
         }
@@ -727,6 +756,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
 
     private fun cancelInput(event: MotionEvent) {
         cancelPendingCircleLasso()
+        pdfLiveStrokes.clear()
         pointerStrokes.values.forEach { wetView.cancelStroke(it, event) }
         pointerStrokes.clear()
         strokeBrushSpecs.keys.retainAll(pendingFinishedStrokeIds)
@@ -796,12 +826,121 @@ class InkPageView(context: Context) : FrameLayout(context) {
         return handleAuthoredStroke(event, pointerIndex, lassoBrush, true)
     }
 
+    private fun recordPdfPoint(
+        live: PdfLiveStroke,
+        x: Float,
+        y: Float,
+        pressure: Float,
+        tiltRadians: Float,
+        orientationRadians: Float,
+        eventTime: Long,
+    ) {
+        val pos = mapViewToWorld(x, y)
+        val elapsed = (eventTime - live.startedAt).coerceAtLeast(live.lastElapsedTime)
+        live.inputs.add(
+            type = InputToolType.STYLUS,
+            x = pos.x,
+            y = pos.y,
+            elapsedTimeMillis = elapsed,
+            strokeUnitLengthCm = StrokeInput.NO_STROKE_UNIT_LENGTH,
+            pressure = pressure.coerceIn(0.01f, 1f),
+            tiltRadians = tiltRadians,
+            orientationRadians = orientationRadians,
+        )
+        if (live.pointCount == 0) live.path.moveTo(pos.x, pos.y)
+        else live.path.lineTo(pos.x, pos.y)
+        live.pointCount++
+        live.lastX = pos.x
+        live.lastY = pos.y
+        live.lastElapsedTime = elapsed
+    }
+
+    private fun recordPdfEvent(live: PdfLiveStroke, event: MotionEvent, pointerIndex: Int) {
+        for (history in 0 until event.historySize) {
+            recordPdfPoint(
+                live,
+                event.getHistoricalX(pointerIndex, history),
+                event.getHistoricalY(pointerIndex, history),
+                event.getHistoricalPressure(pointerIndex, history),
+                event.getHistoricalAxisValue(MotionEvent.AXIS_TILT, pointerIndex, history),
+                event.getHistoricalOrientation(pointerIndex, history),
+                event.getHistoricalEventTime(history),
+            )
+        }
+        recordPdfPoint(
+            live,
+            event.getX(pointerIndex),
+            event.getY(pointerIndex),
+            event.getPressure(pointerIndex),
+            event.getAxisValue(MotionEvent.AXIS_TILT, pointerIndex),
+            event.getOrientation(pointerIndex),
+            event.eventTime,
+        )
+        dryView.postInvalidateOnAnimation()
+    }
+
+    private fun handlePdfLiveStroke(
+        event: MotionEvent,
+        pointerIndex: Int,
+        spec: BrushSpec,
+        lasso: Boolean,
+    ): Boolean {
+        val id = event.getPointerId(pointerIndex)
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                val live = PdfLiveStroke(spec, lasso, event.downTime)
+                pdfLiveStrokes[id] = live
+                recordPdfEvent(live, event, pointerIndex)
+                onAuthoringChanged(true)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                pdfLiveStrokes[id]?.let { recordPdfEvent(it, event, pointerIndex) }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                val live = pdfLiveStrokes.remove(id)
+                if (live != null) {
+                    recordPdfEvent(live, event, pointerIndex)
+                    if (live.inputs.size > 0) {
+                        val stroke = Stroke(
+                            if (live.lasso) lassoBrush else live.brush.toBrush(),
+                            live.inputs,
+                        )
+                        if (live.lasso) {
+                            lassoOutline = live.inputs.toInkSamples().map { PointF(it.x, it.y) }
+                            onLassoFinished(stroke)
+                        } else {
+                            val runtime = stroke.toRuntimeStroke(live.brush)
+                            onStrokeAdded(runtime)
+                            circleLassoCandidate = if (
+                                circleToLassoEnabledProvider() && looksLikeClosedLoop(runtime)
+                            ) CircleLassoCandidate(runtime.stored.id, stroke, runtime.samples) else null
+                            if (circleLassoCandidate != null) onCircleCandidateReady()
+                        }
+                    }
+                }
+                onAuthoringChanged(pdfLiveStrokes.isNotEmpty())
+                releaseParentIntercept()
+                dryView.postInvalidateOnAnimation()
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                pdfLiveStrokes.clear()
+                onAuthoringChanged(false)
+                releaseParentIntercept()
+                dryView.postInvalidateOnAnimation()
+            }
+        }
+        return true
+    }
+
     private fun handleAuthoredStroke(
         event: MotionEvent,
         pointerIndex: Int,
         brush: Brush,
         lasso: Boolean,
     ): Boolean {
+        if (page?.pdfPageIndex != null) {
+            return handlePdfLiveStroke(event, pointerIndex, brushProvider(), lasso)
+        }
         predictor.record(event)
         val pointerId = event.getPointerId(pointerIndex)
         updateViewportMatrices()
@@ -1085,6 +1224,11 @@ class InkPageView(context: Context) : FrameLayout(context) {
         private val paperPaint = Paint().apply { color = Color.WHITE }
         private val outsidePaint = Paint().apply { color = Color.rgb(238, 238, 238) }
         private val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        private val pdfStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
         private val selectionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.rgb(25, 118, 210)
             style = Paint.Style.STROKE
@@ -1202,6 +1346,26 @@ class InkPageView(context: Context) : FrameLayout(context) {
             // Canvas must already contain the same transform used for the PDF and page images.
             for (index in findVisibleStrokeIndices(current)) {
                 renderer.draw(canvas, current.strokes[index].stroke, transform)
+            }
+            // Preview PDF pen input using a plain Canvas path. No V33 renderer
+            // initialization is needed until the final editable stroke exists.
+            pdfLiveStrokes.values.forEach { live ->
+                val baseColor = live.brush.colorArgb
+                pdfStrokePaint.color = if (!live.lasso &&
+                    live.brush.kind == BrushKind.HIGHLIGHTER &&
+                    (baseColor ushr 24) == 0xff
+                ) (0x66 shl 24) or (baseColor and 0xffffff) else baseColor
+                if (live.lasso) pdfStrokePaint.color = 0xff1976d2.toInt()
+                pdfStrokePaint.strokeWidth = if (live.lasso) 3.2f else live.brush.size
+                if (live.pointCount == 1) {
+                    pdfStrokePaint.style = Paint.Style.FILL
+                    canvas.drawCircle(
+                        live.lastX, live.lastY, pdfStrokePaint.strokeWidth / 2f, pdfStrokePaint,
+                    )
+                    pdfStrokePaint.style = Paint.Style.STROKE
+                } else {
+                    canvas.drawPath(live.path, pdfStrokePaint)
+                }
             }
             canvas.restore()
 
