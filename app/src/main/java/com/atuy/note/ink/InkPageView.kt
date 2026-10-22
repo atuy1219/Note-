@@ -272,7 +272,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         configureWetOverlay(newOverlay)
         removeView(oldOverlay)
         wetView = newOverlay
-        addView(newOverlay, LayoutParams(1, 1))
+        addView(newOverlay, indexOfChild(pdfInkPreview), LayoutParams(1, 1))
         renderWidth = 0
         renderHeight = 0
         if (pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty() || pdfLiveStrokes.isNotEmpty()) {
