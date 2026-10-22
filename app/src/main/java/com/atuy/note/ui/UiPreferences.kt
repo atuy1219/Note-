@@ -43,6 +43,10 @@ class UiPreferencesState internal constructor(
     var toolbarDock by mutableStateOf(enumPreference(KEY_TOOLBAR_DOCK, ToolbarDock.TOP))
         private set
 
+    // A display-only preference. The document and its per-page ink remain unchanged.
+    var facingPages by mutableStateOf(preferences.getBoolean(KEY_FACING_PAGES, false))
+        private set
+
     fun updateThemeMode(mode: ThemeMode) {
         themeMode = mode
         preferences.edit().putString(KEY_THEME, mode.name).apply()
@@ -58,6 +62,11 @@ class UiPreferencesState internal constructor(
         preferences.edit().putString(KEY_TOOLBAR_DOCK, dock.name).apply()
     }
 
+    fun updateFacingPages(enabled: Boolean) {
+        facingPages = enabled
+        preferences.edit().putBoolean(KEY_FACING_PAGES, enabled).apply()
+    }
+
     private inline fun <reified T : Enum<T>> enumPreference(key: String, fallback: T): T {
         val stored = preferences.getString(key, null) ?: return fallback
         return enumValues<T>().firstOrNull { it.name == stored } ?: fallback
@@ -67,6 +76,7 @@ class UiPreferencesState internal constructor(
         const val KEY_THEME = "theme_mode"
         const val KEY_TAB_LAYOUT = "tab_layout"
         const val KEY_TOOLBAR_DOCK = "toolbar_dock"
+        const val KEY_FACING_PAGES = "facing_pages"
     }
 }
 

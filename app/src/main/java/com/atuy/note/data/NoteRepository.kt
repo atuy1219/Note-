@@ -13,6 +13,7 @@ import android.graphics.pdf.PdfDocument
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.util.LruCache
 import android.provider.OpenableColumns
 import androidx.ink.storage.StrokeInputBatchSerialization
 import kotlinx.coroutines.Dispatchers
@@ -49,6 +50,38 @@ class NoteRepository(private val context: Context) {
     }
     private val ioMutex = Mutex()
     private val pdfMutex = Mutex()
+    // Cache raster backgrounds, NOT note contents. Pages stay individually editable.
+    // Bound memory when a large PDF (e.g. ~200 pages) is opened in facing-page mode.
+    private data class PdfPageKey(
+        val filePath: String,
+        val updatedMillis: Long,
+        val pageIndex: Int,
+        val width: Int,
+    )
+    private val pdfBitmapCache = object : LruCache<PdfPageKey, Bitmap>(36 * 1024 * 1024) {
+        override fun sizeOf(key: PdfPageKey, value: Bitmap): Int = value.allocationByteCount
+        // Never recycle on eviction: an on-screen DryInkView may still refer to it.
+    }
+    private var activePdfPath: String? = null
+    private var activePdfVersion: Long = 0
+    private var activePdfRenderer: PdfRenderer? = null
+
+    // Must be used under pdfMutex. Only one PdfRenderer.Page can be open at a time.
+    private fun cachedPdfRenderer(source: File): PdfRenderer {
+        val path = source.absolutePath
+        val version = source.lastModified()
+        if (activePdfPath != path || activePdfVersion != version || activePdfRenderer == null) {
+            activePdfRenderer?.close()
+            activePdfRenderer = null
+            activePdfPath = null
+            activePdfRenderer = PdfRenderer(
+                ParcelFileDescriptor.open(source, ParcelFileDescriptor.MODE_READ_ONLY),
+            )
+            activePdfPath = path
+            activePdfVersion = version
+        }
+        return requireNotNull(activePdfRenderer)
+    }
 
     suspend fun loadLibrary(): LibraryIndex = withContext(Dispatchers.IO) {
         ioMutex.withLock {
@@ -351,16 +384,26 @@ class NoteRepository(private val context: Context) {
         withContext(Dispatchers.IO) {
             val source = session.sourcePdfFile ?: return@withContext null
             val index = page.pdfPageIndex ?: return@withContext null
+            val renderWidth = targetWidth.coerceIn(256, 1536)
+            val key = PdfPageKey(source.absolutePath, source.lastModified(), index, renderWidth)
             pdfMutex.withLock {
+                pdfBitmapCache.get(key)?.let { cached ->
+                    if (!cached.isRecycled) return@withLock cached
+                    pdfBitmapCache.remove(key)
+                }
                 runCatching {
-                    ParcelFileDescriptor.open(source, ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
-                        PdfRenderer(descriptor).use { renderer ->
-                            renderer.openPage(index).use { pdfPage ->
-                                val size = boundedRenderSize(targetWidth, pdfPage.width.toFloat(), pdfPage.height.toFloat())
-                                Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888).also { bitmap ->
-                                    bitmap.eraseColor(Color.WHITE)
-                                    pdfPage.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
-                                }
+                    cachedPdfRenderer(source).openPage(index).use { pdfPage ->
+                        val size = boundedRenderSize(
+                            renderWidth, pdfPage.width.toFloat(), pdfPage.height.toFloat(),
+                        )
+                        Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888).also { bitmap ->
+                            try {
+                                bitmap.eraseColor(Color.WHITE)
+                                pdfPage.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                                pdfBitmapCache.put(key, bitmap)
+                            } catch (error: Throwable) {
+                                bitmap.recycle()
+                                throw error
                             }
                         }
                     }

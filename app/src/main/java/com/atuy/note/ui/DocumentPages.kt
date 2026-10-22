@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -23,11 +24,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -72,14 +73,17 @@ internal fun DocumentPages(
     scrollAxis: ScrollAxis,
     navigationMode: NavigationGestureMode,
     readOnly: Boolean,
+    facingPages: Boolean,
+    onToggleFacingPages: () -> Unit,
     modifier: Modifier,
     onVisiblePage: (Int) -> Unit,
     navigationBlocked: () -> Boolean,
     pageContent: @Composable (Int, PageSession, Dp) -> Unit,
 ) {
     var zoom by rememberSaveable { mutableFloatStateOf(1f) }
-    val verticalState = rememberLazyListState(session.activePageIndex)
-    val horizontalState = rememberLazyListState(session.activePageIndex)
+    val firstGroup = displayedGroupIndex(session.activePageIndex, facingPages)
+    val verticalState = rememberLazyListState(firstGroup)
+    val horizontalState = rememberLazyListState(firstGroup)
     val horizontalPan = rememberScrollState()
     val verticalPan = rememberScrollState()
     val vertical = scrollAxis == ScrollAxis.VERTICAL
@@ -94,41 +98,67 @@ internal fun DocumentPages(
     val blockedProvider by rememberUpdatedState(navigationBlocked)
     var lastNavigationVersion by rememberSaveable { mutableIntStateOf(session.pageNavigationVersion) }
     var lastScrollAxis by rememberSaveable { mutableStateOf(scrollAxis) }
+    var lastFacingPages by rememberSaveable { mutableStateOf(facingPages) }
 
-    LaunchedEffect(session.pageNavigationVersion, scrollAxis) {
-        if (lastNavigationVersion != session.pageNavigationVersion || lastScrollAxis != scrollAxis) {
+    LaunchedEffect(session.pageNavigationVersion, scrollAxis, facingPages) {
+        if (lastNavigationVersion != session.pageNavigationVersion ||
+            lastScrollAxis != scrollAxis || lastFacingPages != facingPages
+        ) {
             flingJob?.cancel()
-            val target = session.activePageIndex.coerceIn(0, session.pages.lastIndex)
+            pendingCrossScroll = null
+            pendingZoomAnchor = null
+            val target = displayedGroupIndex(
+                session.activePageIndex.coerceIn(0, session.pages.lastIndex.coerceAtLeast(0)),
+                facingPages,
+            )
             lastNavigationVersion = session.pageNavigationVersion
             lastScrollAxis = scrollAxis
-            mainState.animateScrollToItem(target)
+            lastFacingPages = facingPages
+            mainState.scrollToItem(target)
         }
     }
     val visibleCallback by rememberUpdatedState(onVisiblePage)
-    LaunchedEffect(mainState) {
+    LaunchedEffect(mainState, facingPages) {
         snapshotFlow {
             val layout = mainState.layoutInfo
             layout.visibleItemsInfo.maxByOrNull { item ->
                 (minOf(item.offset + item.size, layout.viewportEndOffset) -
                     maxOf(item.offset, layout.viewportStartOffset)).coerceAtLeast(0)
             }?.index
-        }.collect { index -> index?.let(visibleCallback) }
+        }.collect { index ->
+            index?.takeIf { it in 0 until displayedGroupCount(session.pages.size, facingPages) }
+                ?.let { visibleCallback(displayedGroupFirstPage(it, facingPages)) }
+        }
     }
 
     BoxWithConstraints(modifier) {
-        val baseWidth = (maxWidth - DOCUMENT_PAGE_GAP * 2).coerceIn(1.dp, 900.dp)
-        val pageWidth = baseWidth * zoom
-        val pageWidthPx = with(density) { pageWidth.toPx() }
+        val baseWidth = (maxWidth - DOCUMENT_PAGE_GAP * 2)
+            .coerceIn(1.dp, if (facingPages) 1800.dp else 900.dp)
+        val spreadWidth = baseWidth * zoom
+        val pageWidth = if (facingPages) ((spreadWidth - DOCUMENT_SPREAD_GUTTER) / 2).coerceAtLeast(1.dp) else spreadWidth
+        val spreadWidthPx = with(density) { spreadWidth.toPx() }
         val baseWidthPx = with(density) { baseWidth.toPx() }
+        val gutterPx = with(density) { DOCUMENT_SPREAD_GUTTER.toPx() }
+        val groupCount = displayedGroupCount(session.pages.size, facingPages)
+        fun groupRatio(index: Int): Float {
+            val first = displayedGroupFirstPage(index, facingPages)
+            val left = session.pages[first]
+            val right = if (facingPages) session.pages.getOrNull(first + 1) else null
+            return maxOf(left.height / left.width, right?.let { it.height / it.width } ?: 0f)
+        }
+        fun pagePixels(spreadPixels: Float): Float =
+            if (facingPages) ((spreadPixels - gutterPx) / 2f).coerceAtLeast(1f) else spreadPixels
+        fun mainSize(groupIndex: Int, spreadPixels: Float): Float =
+            if (vertical) pagePixels(spreadPixels) * groupRatio(groupIndex) else spreadPixels
         val viewportCross = with(density) { if (vertical) maxWidth.toPx() else maxHeight.toPx() }
         val viewportCenter = Offset(with(density) { maxWidth.toPx() } / 2f, with(density) { maxHeight.toPx() } / 2f)
         val gapPx = with(density) { DOCUMENT_PAGE_GAP.toPx() }
         val tallestRatio = session.pages.maxOf { it.height / it.width }
         fun crossContentSize(width: Float): Float = maxOf(
-            if (vertical) width else width * tallestRatio + gapPx * 2,
+            if (vertical) width else pagePixels(width) * tallestRatio + gapPx * 2,
             viewportCross,
         )
-        val contentSize = crossContentSize(pageWidthPx)
+        val contentSize = crossContentSize(spreadWidthPx)
         fun pan(delta: Offset): Offset {
             val main = mainState.dispatchRawDelta(if (vertical) -delta.y else -delta.x)
             val cross = crossState.dispatchRawDelta(if (vertical) -delta.x else -delta.y)
@@ -149,13 +179,18 @@ internal fun DocumentPages(
                     distanceToPage(previousMain - padding, it.offset.toFloat(), it.size.toFloat())
                 }
                 if (item != null) {
-                    val pageIndex = pendingZoomAnchor?.page?.pageIndex ?: item.index
-                    val page = session.pages[pageIndex]
-                    val oldWidth = if (vertical) item.size * page.width / page.height else item.size.toFloat()
+                    val groupIndex = (pendingZoomAnchor?.page?.pageIndex ?: item.index)
+                        .coerceIn(0, groupCount - 1)
+                    val oldWidth = if (vertical) {
+                        val oldPageWidth = item.size / groupRatio(groupIndex)
+                        if (facingPages) oldPageWidth * 2f + gutterPx else oldPageWidth
+                    } else {
+                        item.size.toFloat()
+                    }
                     val nextWidth = baseWidthPx * nextZoom
-                    val nextMainSize = if (vertical) nextWidth * page.height / page.width else nextWidth
-                    val oldCrossSize = if (vertical) oldWidth else oldWidth * page.height / page.width
-                    val newCrossSize = if (vertical) nextWidth else nextWidth * page.height / page.width
+                    val nextMainSize = mainSize(groupIndex, nextWidth)
+                    val oldCrossSize = if (vertical) oldWidth else mainSize(groupIndex, oldWidth)
+                    val newCrossSize = if (vertical) nextWidth else mainSize(groupIndex, nextWidth)
                     val anchor = pendingZoomAnchor ?: DocumentZoomAnchor(
                         pageZoomAnchor(item.index, item.offset.toFloat(), item.size.toFloat(), previousMain, padding),
                         crossZoomFraction(oldCrossSize, crossContentSize(oldWidth), crossState.value.toFloat(),
@@ -166,7 +201,7 @@ internal fun DocumentPages(
                         newCrossSize, crossContentSize(nextWidth), if (vertical) focus.x else focus.y,
                     )
                     zoom = nextZoom
-                    mainState.requestScrollToItem(pageIndex, anchor.page.scrollOffset(nextMainSize, focusMain, padding))
+                    mainState.requestScrollToItem(groupIndex, anchor.page.scrollOffset(nextMainSize, focusMain, padding))
                 }
             }
         }
@@ -208,6 +243,27 @@ internal fun DocumentPages(
             }
         }
 
+        val displayItem: @Composable (Int) -> Unit = { index ->
+            if (facingPages) {
+                Row(
+                    Modifier.width(spreadWidth),
+                    horizontalArrangement = Arrangement.spacedBy(DOCUMENT_SPREAD_GUTTER),
+                    verticalAlignment = Alignment.Top,
+                ) {
+                    for (offset in 0..1) {
+                        val pageIndex = index * 2 + offset
+                        val page = session.pages.getOrNull(pageIndex)
+                        if (page != null) {
+                            pageContent(pageIndex, page, pageWidth)
+                        } else {
+                            Box(Modifier.width(pageWidth))
+                        }
+                    }
+                }
+            } else {
+                pageContent(index, session.pages[index], pageWidth)
+            }
+        }
         Box(Modifier.fillMaxSize().then(navigationModifier)) {
             if (vertical) {
                 Box(Modifier.fillMaxSize().horizontalScroll(crossState, enabled = false)) {
@@ -217,15 +273,16 @@ internal fun DocumentPages(
                         contentAlignment = Alignment.TopCenter,
                     ) {
                         LazyColumn(
-                            Modifier.width(pageWidth).fillMaxHeight(),
+                            Modifier.width(spreadWidth).fillMaxHeight(),
                             state = mainState,
                             userScrollEnabled = false,
                             contentPadding = PaddingValues(vertical = DOCUMENT_PAGE_GAP),
                             verticalArrangement = Arrangement.spacedBy(DOCUMENT_PAGE_GAP),
                         ) {
-                            itemsIndexed(session.pages, key = { _, page -> page.id }) { index, page ->
-                                pageContent(index, page, pageWidth)
-                            }
+                            items(
+                                count = groupCount,
+                                key = { index -> session.pages[displayedGroupFirstPage(index, facingPages)].id },
+                            ) { index -> displayItem(index) }
                         }
                     }
                 }
@@ -240,9 +297,10 @@ internal fun DocumentPages(
                         horizontalArrangement = Arrangement.spacedBy(DOCUMENT_PAGE_GAP),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        itemsIndexed(session.pages, key = { _, page -> page.id }) { index, page ->
-                            pageContent(index, page, pageWidth)
-                        }
+                        items(
+                            count = groupCount,
+                            key = { index -> session.pages[displayedGroupFirstPage(index, facingPages)].id },
+                        ) { index -> displayItem(index) }
                     }
                 }
             }
@@ -251,18 +309,30 @@ internal fun DocumentPages(
                 shape = MaterialTheme.shapes.medium,
                 color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
             ) {
-                TextButton(
-                    onClick = {
-                        startCallback()
-                        transformCallback(
-                            viewportCenter,
-                            Offset.Zero, 1f / zoom,
-                        )
-                    },
-                    enabled = !blockedProvider(),
-                    modifier = Modifier.semantics { contentDescription = "拡大率。タップして100%に戻す" },
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Text("${(zoom * 100).roundToInt()}%")
+                    FilterChip(
+                        selected = facingPages,
+                        onClick = onToggleFacingPages,
+                        enabled = !blockedProvider(),
+                        label = { Text("見開き") },
+                    )
+                    TextButton(
+                        onClick = {
+                            startCallback()
+                            transformCallback(
+                                viewportCenter,
+                                Offset.Zero, 1f / zoom,
+                            )
+                        },
+                        enabled = !blockedProvider(),
+                        modifier = Modifier.semantics { contentDescription = "拡大率。タップして100%に戻す" },
+                    ) {
+                        Text("${(zoom * 100).roundToInt()}%")
+                    }
                 }
             }
         }
@@ -327,4 +397,14 @@ private fun Modifier.documentNavigationGesture(
     }
 }
 
+internal fun displayedGroupCount(pageCount: Int, facingPages: Boolean): Int =
+    if (facingPages) (pageCount + 1) / 2 else pageCount
+
+internal fun displayedGroupIndex(pageIndex: Int, facingPages: Boolean): Int =
+    if (facingPages) pageIndex / 2 else pageIndex
+
+internal fun displayedGroupFirstPage(groupIndex: Int, facingPages: Boolean): Int =
+    if (facingPages) groupIndex * 2 else groupIndex
+
 private val DOCUMENT_PAGE_GAP = 14.dp
+private val DOCUMENT_SPREAD_GUTTER = 4.dp

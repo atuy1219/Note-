@@ -131,6 +131,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -162,6 +163,7 @@ import com.atuy.note.data.ScrollAxis
 import com.atuy.note.data.ToolMode
 import com.atuy.note.ink.InkPageView
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -1115,6 +1117,7 @@ private fun EditorWorkspace(
                 }
                 SharedZoomPages(
                     viewModel = viewModel,
+                    uiPreferences = uiPreferences,
                     session = session,
                     readOnly = readOnly,
                     modifier = Modifier.weight(1f),
@@ -1849,6 +1852,20 @@ private fun DetailsPanel(
                 label = { Text("横") },
             )
         }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("表示形式", Modifier.weight(1f))
+            FilterChip(
+                selected = !uiPreferences.facingPages,
+                onClick = { uiPreferences.updateFacingPages(false) },
+                label = { Text("単ページ") },
+            )
+            Spacer(Modifier.width(6.dp))
+            FilterChip(
+                selected = uiPreferences.facingPages,
+                onClick = { uiPreferences.updateFacingPages(true) },
+                label = { Text("見開き") },
+            )
+        }
         HorizontalDivider()
         Text("ツールバー位置", style = MaterialTheme.typography.titleSmall)
         DockChoices(uiPreferences)
@@ -2132,6 +2149,22 @@ private fun HomeSettingsScreen(
                 }
             }
             item {
+                SettingsGroup("表示形式") {
+                    ChoiceRow {
+                        FilterChip(
+                            selected = !uiPreferences.facingPages,
+                            onClick = { uiPreferences.updateFacingPages(false) },
+                            label = { Text("単ページ") },
+                        )
+                        FilterChip(
+                            selected = uiPreferences.facingPages,
+                            onClick = { uiPreferences.updateFacingPages(true) },
+                            label = { Text("見開き（2ページ）") },
+                        )
+                    }
+                }
+            }
+            item {
                 SettingsGroup("ページ方向") {
                     ChoiceRow {
                         FilterChip(
@@ -2180,6 +2213,7 @@ private fun ChoiceRow(content: @Composable () -> Unit) {
 @Composable
 private fun SharedZoomPages(
     viewModel: MainViewModel,
+    uiPreferences: UiPreferencesState,
     session: NoteSession,
     readOnly: Boolean,
     modifier: Modifier,
@@ -2190,8 +2224,19 @@ private fun SharedZoomPages(
         scrollAxis = viewModel.scrollAxis,
         navigationMode = viewModel.navigationGestureMode,
         readOnly = readOnly,
+        facingPages = uiPreferences.facingPages,
+        onToggleFacingPages = {
+            uiPreferences.updateFacingPages(!uiPreferences.facingPages)
+        },
         modifier = modifier,
-        onVisiblePage = { viewModel.activatePage(it, scrollToPage = false) },
+        onVisiblePage = { index ->
+            // Scrolling into a spread must not steal selection from its right-hand page.
+            if (!uiPreferences.facingPages ||
+                displayedGroupIndex(index, true) != displayedGroupIndex(session.activePageIndex, true)
+            ) {
+                viewModel.activatePage(index, scrollToPage = false)
+            }
+        },
         navigationBlocked = { authoringPages.isNotEmpty() },
     ) { index, page, pageWidth ->
         ZoomPage(
@@ -2222,15 +2267,29 @@ private fun ZoomPage(
     onAuthoringChanged: (Boolean) -> Unit,
 ) {
     var pdfWidth by remember(page.id) { mutableIntStateOf(0) }
-    val background by produceState<Bitmap?>(initialValue = null, session.id, page.id, pdfWidth) {
-        if (pdfWidth > 0 && page.pdfPageIndex != null) {
-            delay(120)
-            value = viewModel.renderPdfPage(session, page, pdfWidth)
+    // Keep the previous PDF bitmap during pinch zoom while the next LOD loads.
+    // Restarting produceState at every width previously blanked the paper repeatedly.
+    val background by produceState<Bitmap?>(initialValue = null, session.id, page.id) {
+        if (page.pdfPageIndex != null) {
+            snapshotFlow { pdfWidth }.collectLatest { width ->
+                if (width > 0) {
+                    delay(120)
+                    viewModel.renderPdfPage(session, page, width)?.let { value = it }
+                }
+            }
         }
     }
     Card(
         modifier = modifier.onSizeChanged { size ->
-            pdfWidth = ((size.width + 255) / 256 * 256).coerceIn(256, 2400)
+            // A small fixed set of resolutions avoids PDF decoder thrashing on each
+            // pinch frame. Width is capped at 1536px (~12MiB/page vs 29MiB at 2400).
+            pdfWidth = when {
+                size.width <= 512 -> 512
+                size.width <= 768 -> 768
+                size.width <= 1024 -> 1024
+                size.width <= 1280 -> 1280
+                else -> 1536
+            }
         },
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White),

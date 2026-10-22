@@ -15,16 +15,21 @@ import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
 import android.view.ViewTreeObserver
+import android.util.Log
 import android.widget.FrameLayout
 import androidx.ink.authoring.InProgressStrokeId
 import androidx.ink.authoring.InProgressStrokesFinishedListener
 import androidx.ink.authoring.InProgressStrokesView
 import androidx.ink.brush.Brush
+import androidx.ink.brush.InputToolType
 import androidx.ink.brush.StockBrushes
 import androidx.ink.rendering.android.canvas.CanvasStrokeRenderer
 import androidx.ink.strokes.Stroke
+import androidx.ink.strokes.MutableStrokeInputBatch
+import androidx.ink.strokes.StrokeInput
 import androidx.input.motionprediction.MotionEventPredictor
 import com.atuy.note.data.BrushSpec
+import com.atuy.note.data.BrushKind
 import com.atuy.note.data.InkSample
 import com.atuy.note.data.NavigationGestureMode
 import com.atuy.note.data.PageSession
@@ -32,6 +37,7 @@ import com.atuy.note.data.RuntimeStroke
 import com.atuy.note.data.ToolMode
 import com.atuy.note.data.toBrush
 import com.atuy.note.data.toRuntimeStroke
+import com.atuy.note.data.toInkSamples
 import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
@@ -40,7 +46,8 @@ import java.util.IdentityHashMap
 
 class InkPageView(context: Context) : FrameLayout(context) {
     private val dryView = DryInkView(context)
-    private val wetView = InProgressStrokesView(context)
+    private var wetView = InProgressStrokesView(context)
+    private var wetOverlayWasDetached = false
     // The parent retains virtual page coordinates; the children render only visible pixels.
     private val visibleLayerBounds = Rect()
     private val wetLayerTransform = Matrix()
@@ -85,6 +92,24 @@ class InkPageView(context: Context) : FrameLayout(context) {
 
     private val pointerStrokes = mutableMapOf<Int, InProgressStrokeId>()
     private val pendingFinishedStrokeIds = mutableSetOf<InProgressStrokeId>()
+    private val pendingFinishWatchdogs = mutableMapOf<InProgressStrokeId, Runnable>()
+
+    // Large PDFs use a local handwriting preview, independent of V33 front-buffer
+    // startup and asynchronous hardware-buffer completion. The finalized stroke
+    // is still an ordinary AndroidX Ink Stroke saved in the existing note format.
+    private class PdfLiveStroke(
+        val brush: BrushSpec,
+        val lasso: Boolean,
+        val startedAt: Long,
+    ) {
+        val inputs = MutableStrokeInputBatch()
+        val path = Path()
+        var pointCount = 0
+        var lastX = 0f
+        var lastY = 0f
+        var lastElapsedTime = 0L
+    }
+    private val pdfLiveStrokes = mutableMapOf<Int, PdfLiveStroke>()
     private val pendingViewportMutations = ArrayDeque<ViewportMutation>()
     private val strokeBrushSpecs = mutableMapOf<InProgressStrokeId, BrushSpec>()
     private val lassoStrokeIds = mutableSetOf<InProgressStrokeId>()
@@ -161,13 +186,16 @@ class InkPageView(context: Context) : FrameLayout(context) {
         addView(dryView, LayoutParams(1, 1))
         addView(wetView, LayoutParams(1, 1))
         isFocusableInTouchMode = true
-        wetView.isClickable = false
-        wetView.isFocusable = false
-        // Ink receives the same raw MotionEvents as this exactly-overlaid view.
-        wetView.motionEventToViewTransform = wetLayerTransform
+        configureWetOverlay(wetView)
         scaleDetector.isQuickScaleEnabled = false
-        post { wetView.eagerInit() }
-        wetView.addFinishedStrokesListener(object : InProgressStrokesFinishedListener {
+        // No eagerInit(): offscreen pages do not spin up a V33 front-buffer thread.
+    }
+
+    private fun configureWetOverlay(overlay: InProgressStrokesView) {
+        overlay.isClickable = false
+        overlay.isFocusable = false
+        overlay.motionEventToViewTransform = wetLayerTransform
+        overlay.addFinishedStrokesListener(object : InProgressStrokesFinishedListener {
             override fun onStrokesFinished(strokes: Map<InProgressStrokeId, Stroke>) {
                 strokes.forEach { (id, stroke) ->
                     if (lassoStrokeIds.remove(id)) {
@@ -189,19 +217,72 @@ class InkPageView(context: Context) : FrameLayout(context) {
                     }
                 }
                 val finishedIds = strokes.keys.toSet()
+                finishedIds.forEach { id ->
+                    pendingFinishWatchdogs.remove(id)?.let(::removeCallbacks)
+                }
                 // Keep the wet copy until the frame in which the newly committed dry stroke is drawn.
                 // Camera mutations are deferred during this handoff so both layers always share one view.
                 dryView.postInvalidateOnAnimation()
                 postOnAnimation {
-                    wetView.removeFinishedStrokes(finishedIds)
+                    // Use the originating overlay even if this page has since been detached.
+                    overlay.removeFinishedStrokes(finishedIds)
                     pendingFinishedStrokeIds.removeAll(finishedIds)
-                    onAuthoringChanged(pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty())
+                    // A stylus-up event, not the asynchronous renderer handoff,
+                    // controls whether touch navigation is blocked.
+                    onAuthoringChanged(pointerStrokes.isNotEmpty())
                     flushPendingViewportMutations()
                     updateVisibleLayerBounds()
                     dryView.postInvalidateOnAnimation()
                 }
             }
         })
+    }
+
+    private fun watchStrokeFinish(id: InProgressStrokeId) {
+        // AndroidX Ink's finished-stroke callback depends on a live render surface.
+        // Never allow an unavailable render callback to freeze the page camera forever.
+        val watchdog = Runnable {
+            pendingFinishWatchdogs.remove(id)
+            if (pendingFinishedStrokeIds.remove(id)) {
+                Log.w(TAG, "Ink finalization timed out; unlocking viewport for stroke $id")
+                onAuthoringChanged(pointerStrokes.isNotEmpty())
+                flushPendingViewportMutations()
+                updateVisibleLayerBounds()
+                dryView.postInvalidateOnAnimation()
+            }
+        }
+        pendingFinishWatchdogs[id] = watchdog
+        postDelayed(watchdog, FINISH_WATCHDOG_MS)
+    }
+
+    private fun cancelFinishWatchdogs() {
+        pendingFinishWatchdogs.values.forEach(::removeCallbacks)
+        pendingFinishWatchdogs.clear()
+    }
+
+    private fun replaceDetachedWetOverlay() {
+        // Ink 1.1 V33 replaces its render executor when the SAME view reattaches.
+        // Asynchronous hardware buffer callbacks from its OLD executor can still
+        // run and trigger assertOnRenderThread against the new executor.
+        // Replacing the overlay keeps each render helper bound to one thread generation.
+        val oldOverlay = wetView
+        val newOverlay = InProgressStrokesView(context)
+        configureWetOverlay(newOverlay)
+        removeView(oldOverlay)
+        wetView = newOverlay
+        addView(newOverlay, LayoutParams(1, 1))
+        renderWidth = 0
+        renderHeight = 0
+        if (pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty() || pdfLiveStrokes.isNotEmpty()) {
+            pdfLiveStrokes.clear()
+            cancelFinishWatchdogs()
+            pointerStrokes.clear()
+            pendingFinishedStrokeIds.clear()
+            strokeBrushSpecs.clear()
+            lassoStrokeIds.clear()
+            pendingViewportMutations.clear()
+            onAuthoringChanged(false)
+        }
     }
 
     fun bind(
@@ -290,6 +371,12 @@ class InkPageView(context: Context) : FrameLayout(context) {
     }
 
     override fun onAttachedToWindow() {
+        // Replace the old Ink view BEFORE its ViewGroup reattaches children,
+        // otherwise V33 may reuse the old renderer and swap its render thread.
+        if (wetOverlayWasDetached) {
+            replaceDetachedWetOverlay()
+            wetOverlayWasDetached = false
+        }
         super.onAttachedToWindow()
         viewTreeObserver.addOnPreDrawListener(visibleLayerListener)
     }
@@ -298,6 +385,12 @@ class InkPageView(context: Context) : FrameLayout(context) {
         if (viewTreeObserver.isAlive) {
             viewTreeObserver.removeOnPreDrawListener(visibleLayerListener)
         }
+        wetOverlayWasDetached = true
+        // Lazy list recycling can suppress the after-draw completion callback.
+        // Release document-level navigation regardless of the old renderer state.
+        onAuthoringChanged(false)
+        pdfLiveStrokes.clear()
+        cancelFinishWatchdogs()
         super.onDetachedFromWindow()
     }
 
@@ -309,7 +402,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private fun updateVisibleLayerBounds() {
         if (width <= 0 || height <= 0) return
         // Keep transforms stable until the wet stroke has been committed to dry ink.
-        if ((pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty()) &&
+        if ((pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty() ||
+                pdfLiveStrokes.isNotEmpty()) &&
             renderWidth > 0 && renderHeight > 0
         ) return
 
@@ -388,6 +482,10 @@ class InkPageView(context: Context) : FrameLayout(context) {
         val actionIsStylus = actionToolType == MotionEvent.TOOL_TYPE_STYLUS ||
             actionToolType == MotionEvent.TOOL_TYPE_ERASER
 
+        if (actionIsStylus && pdfLiveStrokes.containsKey(event.getPointerId(routedIndex))) {
+            val live = pdfLiveStrokes[event.getPointerId(routedIndex)]!!
+            return handlePdfLiveStroke(event, routedIndex, live.brush, live.lasso)
+        }
         if (actionIsStylus && pointerStrokes.containsKey(event.getPointerId(routedIndex))) {
             return handleAuthoredStroke(event, routedIndex, brushProvider().toBrush(), false)
         }
@@ -658,6 +756,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
 
     private fun cancelInput(event: MotionEvent) {
         cancelPendingCircleLasso()
+        pdfLiveStrokes.clear()
         pointerStrokes.values.forEach { wetView.cancelStroke(it, event) }
         pointerStrokes.clear()
         strokeBrushSpecs.keys.retainAll(pendingFinishedStrokeIds)
@@ -669,7 +768,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         finishEraserGesture()
         touchGestureActive = false
         scaleGestureInProgress = false
-        onAuthoringChanged(pendingFinishedStrokeIds.isNotEmpty())
+        onAuthoringChanged(false)
         releaseParentIntercept()
         dryView.postInvalidateOnAnimation()
     }
@@ -727,12 +826,128 @@ class InkPageView(context: Context) : FrameLayout(context) {
         return handleAuthoredStroke(event, pointerIndex, lassoBrush, true)
     }
 
+    private fun recordPdfPoint(
+        live: PdfLiveStroke,
+        x: Float,
+        y: Float,
+        pressure: Float,
+        tiltRadians: Float,
+        orientationRadians: Float,
+        eventTime: Long,
+    ) {
+        val pos = mapViewToWorld(x, y)
+        if (!pos.x.isFinite() || !pos.y.isFinite()) return
+        val elapsed = (eventTime - live.startedAt).coerceAtLeast(live.lastElapsedTime)
+        // Some devices include the same x/y/time triplet both as historical input
+        // and on ACTION_UP. Ink rejects duplicates, so do not append them twice.
+        if (live.pointCount > 0 &&
+            pos.x == live.lastX && pos.y == live.lastY &&
+            elapsed == live.lastElapsedTime
+        ) return
+        live.inputs.add(
+            type = InputToolType.STYLUS,
+            x = pos.x,
+            y = pos.y,
+            elapsedTimeMillis = elapsed,
+            strokeUnitLengthCm = StrokeInput.NO_STROKE_UNIT_LENGTH,
+            pressure = motionPressureToInk(pressure),
+            tiltRadians = motionTiltToInkRadians(tiltRadians),
+            orientationRadians = motionOrientationToInkRadians(orientationRadians),
+        )
+        if (live.pointCount == 0) live.path.moveTo(pos.x, pos.y)
+        else live.path.lineTo(pos.x, pos.y)
+        live.pointCount++
+        live.lastX = pos.x
+        live.lastY = pos.y
+        live.lastElapsedTime = elapsed
+    }
+
+    private fun recordPdfEvent(live: PdfLiveStroke, event: MotionEvent, pointerIndex: Int) {
+        for (history in 0 until event.historySize) {
+            recordPdfPoint(
+                live,
+                event.getHistoricalX(pointerIndex, history),
+                event.getHistoricalY(pointerIndex, history),
+                event.getHistoricalPressure(pointerIndex, history),
+                event.getHistoricalAxisValue(MotionEvent.AXIS_TILT, pointerIndex, history),
+                event.getHistoricalOrientation(pointerIndex, history),
+                event.getHistoricalEventTime(history),
+            )
+        }
+        recordPdfPoint(
+            live,
+            event.getX(pointerIndex),
+            event.getY(pointerIndex),
+            event.getPressure(pointerIndex),
+            event.getAxisValue(MotionEvent.AXIS_TILT, pointerIndex),
+            event.getOrientation(pointerIndex),
+            event.eventTime,
+        )
+        dryView.postInvalidateOnAnimation()
+    }
+
+    private fun handlePdfLiveStroke(
+        event: MotionEvent,
+        pointerIndex: Int,
+        spec: BrushSpec,
+        lasso: Boolean,
+    ): Boolean {
+        val id = event.getPointerId(pointerIndex)
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
+                val live = PdfLiveStroke(spec, lasso, event.downTime)
+                pdfLiveStrokes[id] = live
+                recordPdfEvent(live, event, pointerIndex)
+                onAuthoringChanged(true)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                pdfLiveStrokes[id]?.let { recordPdfEvent(it, event, pointerIndex) }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
+                val live = pdfLiveStrokes.remove(id)
+                if (live != null) {
+                    recordPdfEvent(live, event, pointerIndex)
+                    if (live.inputs.size > 0) {
+                        val stroke = Stroke(
+                            if (live.lasso) lassoBrush else live.brush.toBrush(),
+                            live.inputs,
+                        )
+                        if (live.lasso) {
+                            lassoOutline = live.inputs.toInkSamples().map { PointF(it.x, it.y) }
+                            onLassoFinished(stroke)
+                        } else {
+                            val runtime = stroke.toRuntimeStroke(live.brush)
+                            onStrokeAdded(runtime)
+                            circleLassoCandidate = if (
+                                circleToLassoEnabledProvider() && looksLikeClosedLoop(runtime)
+                            ) CircleLassoCandidate(runtime.stored.id, stroke, runtime.samples) else null
+                            if (circleLassoCandidate != null) onCircleCandidateReady()
+                        }
+                    }
+                }
+                onAuthoringChanged(pdfLiveStrokes.isNotEmpty())
+                releaseParentIntercept()
+                dryView.postInvalidateOnAnimation()
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                pdfLiveStrokes.clear()
+                onAuthoringChanged(false)
+                releaseParentIntercept()
+                dryView.postInvalidateOnAnimation()
+            }
+        }
+        return true
+    }
+
     private fun handleAuthoredStroke(
         event: MotionEvent,
         pointerIndex: Int,
         brush: Brush,
         lasso: Boolean,
     ): Boolean {
+        if (page?.pdfPageIndex != null) {
+            return handlePdfLiveStroke(event, pointerIndex, brushProvider(), lasso)
+        }
         predictor.record(event)
         val pointerId = event.getPointerId(pointerIndex)
         updateViewportMatrices()
@@ -770,8 +985,13 @@ class InkPageView(context: Context) : FrameLayout(context) {
             MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
                 pointerStrokes.remove(pointerId)?.let { id ->
                     pendingFinishedStrokeIds += id
+                    watchStrokeFinish(id)
                     wetView.finishStroke(event, pointerId, id)
                 }
+                // Previously navigation stayed blocked until onStrokesFinished.
+                // That callback can be indefinitely delayed on V33 or offscreen
+                // surfaces, effectively disabling touch/pinch after the first pen.
+                onAuthoringChanged(pointerStrokes.isNotEmpty())
                 releaseParentIntercept()
                 true
             }
@@ -780,7 +1000,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 pointerStrokes.clear()
                 strokeBrushSpecs.clear()
                 lassoStrokeIds.clear()
-                onAuthoringChanged(pendingFinishedStrokeIds.isNotEmpty())
+                onAuthoringChanged(false)
                 releaseParentIntercept()
                 true
             }
@@ -999,6 +1219,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
         const val MAX_CIRCLE_GAP = 28f
         const val MAX_CIRCLE_GAP_RATIO = 0.24f
         const val MIN_CIRCLE_PATH_RATIO = 1.15f
+        const val FINISH_WATCHDOG_MS = 1500L
+        const val TAG = "NoteInkPage"
         const val STROKE_CELL_SIZE = 128f
         const val MAX_CELLS_PER_STROKE = 64
     }
@@ -1009,6 +1231,11 @@ class InkPageView(context: Context) : FrameLayout(context) {
         private val paperPaint = Paint().apply { color = Color.WHITE }
         private val outsidePaint = Paint().apply { color = Color.rgb(238, 238, 238) }
         private val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        private val pdfStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
         private val selectionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.rgb(25, 118, 210)
             style = Paint.Style.STROKE
@@ -1126,6 +1353,26 @@ class InkPageView(context: Context) : FrameLayout(context) {
             // Canvas must already contain the same transform used for the PDF and page images.
             for (index in findVisibleStrokeIndices(current)) {
                 renderer.draw(canvas, current.strokes[index].stroke, transform)
+            }
+            // Preview PDF pen input using a plain Canvas path. No V33 renderer
+            // initialization is needed until the final editable stroke exists.
+            pdfLiveStrokes.values.forEach { live ->
+                val baseColor = live.brush.colorArgb
+                pdfStrokePaint.color = if (!live.lasso &&
+                    live.brush.kind == BrushKind.HIGHLIGHTER &&
+                    (baseColor ushr 24) == 0xff
+                ) (0x66 shl 24) or (baseColor and 0xffffff) else baseColor
+                if (live.lasso) pdfStrokePaint.color = 0xff1976d2.toInt()
+                pdfStrokePaint.strokeWidth = if (live.lasso) 3.2f else live.brush.size
+                if (live.pointCount == 1) {
+                    pdfStrokePaint.style = Paint.Style.FILL
+                    canvas.drawCircle(
+                        live.lastX, live.lastY, pdfStrokePaint.strokeWidth / 2f, pdfStrokePaint,
+                    )
+                    pdfStrokePaint.style = Paint.Style.STROKE
+                } else {
+                    canvas.drawPath(live.path, pdfStrokePaint)
+                }
             }
             canvas.restore()
 
