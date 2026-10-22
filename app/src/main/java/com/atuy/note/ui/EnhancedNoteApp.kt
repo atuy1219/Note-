@@ -1115,6 +1115,7 @@ private fun EditorWorkspace(
                 }
                 SharedZoomPages(
                     viewModel = viewModel,
+                    uiPreferences = uiPreferences,
                     session = session,
                     readOnly = readOnly,
                     modifier = Modifier.weight(1f),
@@ -1849,6 +1850,20 @@ private fun DetailsPanel(
                 label = { Text("横") },
             )
         }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("表示形式", Modifier.weight(1f))
+            FilterChip(
+                selected = !uiPreferences.facingPages,
+                onClick = { uiPreferences.updateFacingPages(false) },
+                label = { Text("単ページ") },
+            )
+            Spacer(Modifier.width(6.dp))
+            FilterChip(
+                selected = uiPreferences.facingPages,
+                onClick = { uiPreferences.updateFacingPages(true) },
+                label = { Text("見開き") },
+            )
+        }
         HorizontalDivider()
         Text("ツールバー位置", style = MaterialTheme.typography.titleSmall)
         DockChoices(uiPreferences)
@@ -2132,6 +2147,22 @@ private fun HomeSettingsScreen(
                 }
             }
             item {
+                SettingsGroup("表示形式") {
+                    ChoiceRow {
+                        FilterChip(
+                            selected = !uiPreferences.facingPages,
+                            onClick = { uiPreferences.updateFacingPages(false) },
+                            label = { Text("単ページ") },
+                        )
+                        FilterChip(
+                            selected = uiPreferences.facingPages,
+                            onClick = { uiPreferences.updateFacingPages(true) },
+                            label = { Text("見開き（2ページ）") },
+                        )
+                    }
+                }
+            }
+            item {
                 SettingsGroup("ページ方向") {
                     ChoiceRow {
                         FilterChip(
@@ -2180,6 +2211,7 @@ private fun ChoiceRow(content: @Composable () -> Unit) {
 @Composable
 private fun SharedZoomPages(
     viewModel: MainViewModel,
+    uiPreferences: UiPreferencesState,
     session: NoteSession,
     readOnly: Boolean,
     modifier: Modifier,
@@ -2190,8 +2222,19 @@ private fun SharedZoomPages(
         scrollAxis = viewModel.scrollAxis,
         navigationMode = viewModel.navigationGestureMode,
         readOnly = readOnly,
+        facingPages = uiPreferences.facingPages,
+        onToggleFacingPages = {
+            uiPreferences.updateFacingPages(!uiPreferences.facingPages)
+        },
         modifier = modifier,
-        onVisiblePage = { viewModel.activatePage(it, scrollToPage = false) },
+        onVisiblePage = { index ->
+            // Scrolling into a spread must not steal selection from its right-hand page.
+            if (!uiPreferences.facingPages ||
+                displayedGroupIndex(index, true) != displayedGroupIndex(session.activePageIndex, true)
+            ) {
+                viewModel.activatePage(index, scrollToPage = false)
+            }
+        },
         navigationBlocked = { authoringPages.isNotEmpty() },
     ) { index, page, pageWidth ->
         ZoomPage(
