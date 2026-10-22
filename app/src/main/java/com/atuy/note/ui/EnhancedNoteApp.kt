@@ -152,6 +152,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.zIndex
 import com.atuy.note.MainViewModel
 import com.atuy.note.data.BrushKind
+import com.atuy.note.data.EraserMode
 import com.atuy.note.data.CustomBrushSpec
 import com.atuy.note.data.FolderRecord
 import com.atuy.note.data.LassoCoverageMode
@@ -1534,9 +1535,37 @@ private fun EditorDetailPanel(
                 EditorPanel.AI -> AiPanel(viewModel)
                 EditorPanel.PEN -> PenPanel(viewModel)
                 EditorPanel.HIGHLIGHTER -> PenPanel(viewModel, highlighter = true)
-                EditorPanel.ERASER -> Text(
-                    "線単位で消去します。スタイラスの消しゴムボタンも利用できます。",
-                )
+                EditorPanel.ERASER -> Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text("消しゴムの種類")
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = viewModel.eraserMode == EraserMode.STROKE,
+                            onClick = { viewModel.chooseEraserMode(EraserMode.STROKE) },
+                            label = { Text("線単位") },
+                        )
+                        FilterChip(
+                            selected = viewModel.eraserMode == EraserMode.MESH,
+                            onClick = { viewModel.chooseEraserMode(EraserMode.MESH) },
+                            label = { Text("メッシュ消しゴム") },
+                        )
+                    }
+                    Text("サイズ: ${viewModel.eraserDiameterPx.toInt()} px")
+                    Slider(
+                        value = viewModel.eraserDiameterPx,
+                        onValueChange = viewModel::updateEraserDiameterPx,
+                        valueRange = 8f..160f,
+                    )
+                    Text(
+                        if (viewModel.eraserMode == EraserMode.MESH) {
+                            "ペンでなぞると消した部分が順次反映されます。円形のカーソルで範囲を確認できます。"
+                        } else {
+                            "触れた線全体を消去します。円形のカーソルで範囲を確認できます。"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
                 EditorPanel.LASSO -> LassoPanel(viewModel)
                 EditorPanel.TEXT -> FeaturePanel(
                     "テキスト",
@@ -1832,6 +1861,30 @@ private fun DetailsPanel(
         ActivityResultContracts.CreateDocument(NoteExportFormat.PNG_ZIP.mimeType),
         viewModel::completeExport,
     )
+    var pendingClearAll by remember { mutableStateOf<Boolean?>(null) }
+    if (pendingClearAll != null) {
+        val allPages = pendingClearAll == true
+        AlertDialog(
+            onDismissRequest = { pendingClearAll = null },
+            title = { Text(if (allPages) "すべてのページのマークアップを削除" else "現在のページのマークアップを削除") },
+            text = {
+                Text(
+                    "手書き筆跡と配置画像を削除します。PDF原本とページは保持します。" +
+                        if (allPages) " 全ページに適用されます。各ページの操作履歴から元に戻せます。" else
+                            " 元に戻す操作で復元できます。",
+                )
+            },
+            confirmButton = {
+                Button(onClick = {
+                    viewModel.clearPdfMarkups(allPages)
+                    pendingClearAll = null
+                }) { Text("マークアップを削除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingClearAll = null }) { Text("キャンセル") }
+            },
+        )
+    }
     Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("ページ", style = MaterialTheme.typography.titleSmall)
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1869,6 +1922,27 @@ private fun DetailsPanel(
         HorizontalDivider()
         Text("ツールバー位置", style = MaterialTheme.typography.titleSmall)
         DockChoices(uiPreferences)
+        if (viewModel.activeSession?.sourcePdfFile != null) {
+            HorizontalDivider()
+            Text("PDFのマークアップ", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "PDF原本は削除せず、このアプリで追加した筆跡と配置画像のみ削除します。",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            OutlinedButton(
+                enabled = viewModel.activePage?.strokes?.isNotEmpty() == true ||
+                    viewModel.activePage?.images?.isNotEmpty() == true,
+                onClick = { pendingClearAll = false },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("このページのマークアップを削除") }
+            OutlinedButton(
+                enabled = viewModel.activeSession?.pages?.any {
+                    it.strokes.isNotEmpty() || it.images.isNotEmpty()
+                } == true,
+                onClick = { pendingClearAll = true },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("全ページのマークアップを削除") }
+        }
         HorizontalDivider()
         Text("エクスポート", style = MaterialTheme.typography.titleSmall)
         Text("手書き・配置画像・PDF背景を含めて書き出します。", style = MaterialTheme.typography.bodySmall)
@@ -2308,6 +2382,7 @@ private fun ZoomPage(
                         imageBitmaps = session.imageBitmaps,
                         toolProvider = { viewModel.toolMode },
                         brushProvider = { viewModel.brushSpec },
+                        eraserDiameterProvider = { viewModel.eraserDiameterPx },
                         navigationGestureProvider = { viewModel.navigationGestureMode },
                         circleToLassoEnabledProvider = { viewModel.circleToLassoEnabled },
                         readOnlyProvider = { readOnly },
