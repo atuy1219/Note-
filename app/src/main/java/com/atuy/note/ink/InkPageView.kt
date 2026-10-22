@@ -836,16 +836,23 @@ class InkPageView(context: Context) : FrameLayout(context) {
         eventTime: Long,
     ) {
         val pos = mapViewToWorld(x, y)
+        if (!pos.x.isFinite() || !pos.y.isFinite()) return
         val elapsed = (eventTime - live.startedAt).coerceAtLeast(live.lastElapsedTime)
+        // Some devices include the same x/y/time triplet both as historical input
+        // and on ACTION_UP. Ink rejects duplicates, so do not append them twice.
+        if (live.pointCount > 0 &&
+            pos.x == live.lastX && pos.y == live.lastY &&
+            elapsed == live.lastElapsedTime
+        ) return
         live.inputs.add(
             type = InputToolType.STYLUS,
             x = pos.x,
             y = pos.y,
             elapsedTimeMillis = elapsed,
             strokeUnitLengthCm = StrokeInput.NO_STROKE_UNIT_LENGTH,
-            pressure = pressure.coerceIn(0.01f, 1f),
-            tiltRadians = tiltRadians,
-            orientationRadians = orientationRadians,
+            pressure = motionPressureToInk(pressure),
+            tiltRadians = motionTiltToInkRadians(tiltRadians),
+            orientationRadians = motionOrientationToInkRadians(orientationRadians),
         )
         if (live.pointCount == 0) live.path.moveTo(pos.x, pos.y)
         else live.path.lineTo(pos.x, pos.y)
