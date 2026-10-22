@@ -845,7 +845,7 @@ private fun InputToolType.toStoredInputToolType(): StoredInputToolType = when (t
 
 private fun sameStrokeSequence(a: List<RuntimeStroke>, b: List<RuntimeStroke>): Boolean =
     a.size == b.size && a.indices.all { index ->
-        a[index].stored.id == b[index].stored.id && a[index].samples == b[index].samples
+        a[index].stored.id == b[index].stored.id && a[index].samples == b[index].samples && a[index].stored.meshErases == b[index].stored.meshErases
     }
 
 private fun polylineIntersectsCircle(samples: List<InkSample>, cx: Float, cy: Float, radius: Float): Boolean {
