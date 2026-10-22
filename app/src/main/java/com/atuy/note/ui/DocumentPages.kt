@@ -126,7 +126,8 @@ internal fun DocumentPages(
                     maxOf(item.offset, layout.viewportStartOffset)).coerceAtLeast(0)
             }?.index
         }.collect { index ->
-            index?.let { visibleCallback(displayedGroupFirstPage(it, facingPages)) }
+            index?.takeIf { it in 0 until displayedGroupCount(session.pages.size, facingPages) }
+                ?.let { visibleCallback(displayedGroupFirstPage(it, facingPages)) }
         }
     }
 
