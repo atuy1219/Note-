@@ -141,6 +141,10 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private var boundContentVersion = -1
     private var toolProvider: () -> ToolMode = { ToolMode.PEN }
     private var brushProvider: () -> BrushSpec = { BrushSpec() }
+    private var eraserDiameterProvider: () -> Float = { 56f }
+    private var eraserCursorVisible = false
+    private var eraserCursorX = 0f
+    private var eraserCursorY = 0f
     private var navigationGestureProvider: () -> NavigationGestureMode = { NavigationGestureMode.ONE_FINGER }
     private var circleToLassoEnabledProvider: () -> Boolean = { false }
     private var readOnlyProvider: () -> Boolean = { false }
@@ -294,6 +298,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         imageBitmaps: Map<String, Bitmap>,
         toolProvider: () -> ToolMode,
         brushProvider: () -> BrushSpec,
+        eraserDiameterProvider: () -> Float = { 56f },
         navigationGestureProvider: () -> NavigationGestureMode,
         circleToLassoEnabledProvider: () -> Boolean,
         readOnlyProvider: () -> Boolean = { false },
@@ -329,6 +334,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
         this.page = page
         this.toolProvider = toolProvider
         this.brushProvider = brushProvider
+        this.eraserDiameterProvider = eraserDiameterProvider
+        if (eraserCursorVisible) pdfInkPreview.postInvalidateOnAnimation()
         this.navigationGestureProvider = navigationGestureProvider
         this.circleToLassoEnabledProvider = circleToLassoEnabledProvider
         this.readOnlyProvider = readOnlyProvider
@@ -461,6 +468,28 @@ class InkPageView(context: Context) : FrameLayout(context) {
 
     override fun onTouchEvent(event: MotionEvent): Boolean = handleMotionEvent(event)
 
+    private fun updateEraserCursor(x: Float, y: Float, visible: Boolean) {
+        eraserCursorX = x
+        eraserCursorY = y
+        eraserCursorVisible = visible
+        pdfInkPreview.postInvalidateOnAnimation()
+    }
+
+    override fun onHoverEvent(event: MotionEvent): Boolean {
+        if (event.pointerCount == 0) return super.onHoverEvent(event)
+        val stylus = event.getToolType(0) == MotionEvent.TOOL_TYPE_STYLUS ||
+            event.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER
+        val enabled = !readOnlyProvider() && stylus &&
+            (toolProvider() == ToolMode.ERASER ||
+                event.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER)
+        if (event.actionMasked == MotionEvent.ACTION_HOVER_EXIT || !enabled) {
+            updateEraserCursor(0f, 0f, false)
+        } else {
+            updateEraserCursor(event.x, event.y, true)
+        }
+        return enabled || super.onHoverEvent(event)
+    }
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         clampViewport()
@@ -530,7 +559,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
         val point = mapViewToWorld(event.getX(routedIndex), event.getY(routedIndex))
 
         if (erasing) {
-            val radius = screenDistanceToWorld(28f)
+            val radius = screenDistanceToWorld(eraserDiameterProvider().coerceIn(8f, 160f) / 2f)
+            updateEraserCursor(event.getX(routedIndex), event.getY(routedIndex), true)
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                     if (!eraserGestureActive) {
@@ -544,6 +574,13 @@ class InkPageView(context: Context) : FrameLayout(context) {
                     for (pointerIndex in 0 until event.pointerCount) {
                         val type = event.getToolType(pointerIndex)
                         if (type != MotionEvent.TOOL_TYPE_STYLUS && type != MotionEvent.TOOL_TYPE_ERASER) continue
+                        for (history in 0 until event.historySize) {
+                            val p = mapViewToWorld(
+                                event.getHistoricalX(pointerIndex, history),
+                                event.getHistoricalY(pointerIndex, history),
+                            )
+                            onErase(p.x, p.y, radius)
+                        }
                         val current = mapViewToWorld(event.getX(pointerIndex), event.getY(pointerIndex))
                         onErase(current.x, current.y, radius)
                     }
@@ -552,11 +589,13 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_POINTER_UP -> {
                     onErase(point.x, point.y, radius)
                     finishEraserGesture()
+                    updateEraserCursor(0f, 0f, false)
                     releaseParentIntercept()
                     dryView.invalidate()
                 }
                 MotionEvent.ACTION_CANCEL -> {
                     finishEraserGesture()
+                    updateEraserCursor(0f, 0f, false)
                     releaseParentIntercept()
                     dryView.invalidate()
                 }
@@ -763,6 +802,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private fun cancelInput(event: MotionEvent) {
         cancelPendingCircleLasso()
         pdfLiveStrokes.clear()
+        updateEraserCursor(0f, 0f, false)
         pdfInkPreview.postInvalidateOnAnimation()
         pointerStrokes.values.forEach { wetView.cancelStroke(it, event) }
         pointerStrokes.clear()
@@ -1236,6 +1276,11 @@ class InkPageView(context: Context) : FrameLayout(context) {
     // Invalidating this transparent overlay never redraws the PDF or dry ink.
     // All coordinates are in the same world space as the bounded DryInkView.
     private inner class PdfInkPreviewView(context: Context) : View(context) {
+        private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xff0a84ff.toInt()
+            strokeWidth = 2f
+            style = Paint.Style.STROKE
+        }
         private val previewPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             style = Paint.Style.STROKE
             strokeCap = Paint.Cap.ROUND
@@ -1245,7 +1290,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         init { isClickable = false; isFocusable = false }
 
         override fun onDraw(canvas: Canvas) {
-            if (pdfLiveStrokes.isEmpty()) return
+            if (pdfLiveStrokes.isEmpty() && !eraserCursorVisible) return
             canvas.save()
             canvas.translate(-renderOriginX.toFloat(), -renderOriginY.toFloat())
             canvas.concat(worldToView)
@@ -1269,6 +1314,20 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 }
             }
             canvas.restore()
+            if (eraserCursorVisible) {
+                // Cursor position is in the parent page's view coordinates; the
+                // overlay itself is translated to renderOriginX/Y for bounded rendering.
+                val worldRadius = screenDistanceToWorld(
+                    eraserDiameterProvider().coerceIn(8f, 160f) / 2f,
+                )
+                val viewRadius = worldToView.mapRadius(worldRadius)
+                canvas.drawCircle(
+                    eraserCursorX - renderOriginX,
+                    eraserCursorY - renderOriginY,
+                    viewRadius,
+                    cursorPaint,
+                )
+            }
         }
     }
 
