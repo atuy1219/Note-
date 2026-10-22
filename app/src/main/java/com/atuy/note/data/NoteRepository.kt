@@ -33,6 +33,7 @@ import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
+import java.util.zip.CRC32
 import kotlin.math.max
 import kotlin.math.min
 
@@ -50,6 +51,26 @@ class NoteRepository(private val context: Context) {
     }
     private val ioMutex = Mutex()
     private val pdfMutex = Mutex()
+    // Source PDFs are immutable after import; compute CRC once to allow ZIP STORED
+    // entries, avoiding redundant Deflate work on every 900ms autosave.
+    private data class SourceCrcKey(val path: String, val modified: Long, val length: Long)
+    private val sourceCrcCache = HashMap<SourceCrcKey, Long>()
+    private fun sourceCrc(file: File): Long {
+        val key = SourceCrcKey(file.absolutePath, file.lastModified(), file.length())
+        sourceCrcCache[key]?.let { return it }
+        val crc = CRC32()
+        FileInputStream(file).buffered().use { input ->
+            val buf = ByteArray(64 * 1024)
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                crc.update(buf, 0, n)
+            }
+        }
+        sourceCrcCache.clear()
+        sourceCrcCache[key] = crc.value
+        return crc.value
+    }
     // Cache raster backgrounds, NOT note contents. Pages stay individually editable.
     // Bound memory when a large PDF (e.g. ~200 pages) is opened in facing-page mode.
     private data class PdfPageKey(
@@ -374,7 +395,8 @@ class NoteRepository(private val context: Context) {
                 runtime.stored.inkEntry to StrokeInputBatchSerialization.encode(runtime.stroke.inputs)
             }
             writeArchive(snapshot.archiveFile, document, snapshot.sourcePdfFile, snapshot.imageFiles, inkEntries)
-            val thumb = renderThumbnail(document, snapshot.sourcePdfFile, snapshot.imageFiles, inkEntries)
+            val thumb = thumbnailFile(document.id).takeIf { it.isFile && !snapshot.updateThumbnail }
+                ?: renderThumbnail(document, snapshot.sourcePdfFile, snapshot.imageFiles, inkEntries)
             val summary = summaryFor(document, thumb)
             current.copy(notes = current.notes.filterNot { it.id == document.id } + summary).also(::writeLibrary)
         }
@@ -416,8 +438,15 @@ class NoteRepository(private val context: Context) {
         val images = page.images.toList()
         val bitmaps = session.imageBitmaps.toMap()
         val size = boundedRenderSize(targetWidth.coerceAtMost(1200), page.width, page.height)
-        val base = renderPdfPage(session, page, size.width)
-            ?: Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.WHITE) }
+        val background = renderPdfPage(session, page, size.width)
+        // The shared LRU entry is immutable. Draw preview annotations into a separate
+        // bitmap or they leak into the editor's PDF background.
+        val base = withContext(Dispatchers.Default) {
+            background?.copy(Bitmap.Config.ARGB_8888, true)
+                ?: Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888).apply {
+                    eraseColor(Color.WHITE)
+                }
+        }
         return withContext(Dispatchers.Default) {
             val canvas = Canvas(base)
             val sx = base.width / page.width
@@ -765,8 +794,15 @@ class NoteRepository(private val context: Context) {
             zip.closeEntry()
             if (document.sourcePdfEntry != null) {
                 require(pdfFile?.isFile == true) { "Notebook PDF is missing" }
-                zip.putNextEntry(ZipEntry("background/source.pdf"))
-                FileInputStream(pdfFile).use { it.copyTo(zip) }
+                val source = pdfFile
+                val pdfEntry = ZipEntry("background/source.pdf").apply {
+                    method = ZipEntry.STORED
+                    size = source.length()
+                    compressedSize = source.length()
+                    crc = sourceCrc(source)
+                }
+                zip.putNextEntry(pdfEntry)
+                FileInputStream(source).use { it.copyTo(zip) }
                 zip.closeEntry()
             }
             val referencedImages = document.pages.flatMap { it.images }.map { it.entryName }.distinct()

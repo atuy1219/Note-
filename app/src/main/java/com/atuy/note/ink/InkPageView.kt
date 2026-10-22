@@ -46,6 +46,7 @@ import java.util.IdentityHashMap
 
 class InkPageView(context: Context) : FrameLayout(context) {
     private val dryView = DryInkView(context)
+    private val pdfInkPreview = PdfInkPreviewView(context)
     private var wetView = InProgressStrokesView(context)
     private var wetOverlayWasDetached = false
     // The parent retains virtual page coordinates; the children render only visible pixels.
@@ -185,6 +186,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         setWillNotDraw(true)
         addView(dryView, LayoutParams(1, 1))
         addView(wetView, LayoutParams(1, 1))
+        addView(pdfInkPreview, LayoutParams(1, 1))
         isFocusableInTouchMode = true
         configureWetOverlay(wetView)
         scaleDetector.isQuickScaleEnabled = false
@@ -270,7 +272,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         configureWetOverlay(newOverlay)
         removeView(oldOverlay)
         wetView = newOverlay
-        addView(newOverlay, LayoutParams(1, 1))
+        addView(newOverlay, indexOfChild(pdfInkPreview), LayoutParams(1, 1))
         renderWidth = 0
         renderHeight = 0
         if (pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty() || pdfLiveStrokes.isNotEmpty()) {
@@ -390,6 +392,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         // Release document-level navigation regardless of the old renderer state.
         onAuthoringChanged(false)
         pdfLiveStrokes.clear()
+        pdfInkPreview.postInvalidateOnAnimation()
         cancelFinishWatchdogs()
         super.onDetachedFromWindow()
     }
@@ -423,7 +426,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
         if (newLeft == renderOriginX && newTop == renderOriginY &&
             newWidth == renderWidth && newHeight == renderHeight &&
             dryView.measuredWidth == newWidth && dryView.measuredHeight == newHeight &&
-            wetView.measuredWidth == newWidth && wetView.measuredHeight == newHeight
+            wetView.measuredWidth == newWidth && wetView.measuredHeight == newHeight &&
+            pdfInkPreview.measuredWidth == newWidth && pdfInkPreview.measuredHeight == newHeight
         ) return
 
         renderOriginX = newLeft
@@ -434,8 +438,10 @@ class InkPageView(context: Context) : FrameLayout(context) {
         val hSpec = MeasureSpec.makeMeasureSpec(newHeight, MeasureSpec.EXACTLY)
         dryView.measure(wSpec, hSpec)
         wetView.measure(wSpec, hSpec)
+        pdfInkPreview.measure(wSpec, hSpec)
         dryView.layout(newLeft, newTop, newRight, newBottom)
         wetView.layout(newLeft, newTop, newRight, newBottom)
+        pdfInkPreview.layout(newLeft, newTop, newRight, newBottom)
         wetLayerTransform.setTranslate(-newLeft.toFloat(), -newTop.toFloat())
         wetView.motionEventToViewTransform = wetLayerTransform
         dryView.postInvalidateOnAnimation()
@@ -757,6 +763,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
     private fun cancelInput(event: MotionEvent) {
         cancelPendingCircleLasso()
         pdfLiveStrokes.clear()
+        pdfInkPreview.postInvalidateOnAnimation()
         pointerStrokes.values.forEach { wetView.cancelStroke(it, event) }
         pointerStrokes.clear()
         strokeBrushSpecs.keys.retainAll(pendingFinishedStrokeIds)
@@ -883,7 +890,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
             event.getOrientation(pointerIndex),
             event.eventTime,
         )
-        dryView.postInvalidateOnAnimation()
+        pdfInkPreview.postInvalidateOnAnimation()
     }
 
     private fun handlePdfLiveStroke(
@@ -927,13 +934,14 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 }
                 onAuthoringChanged(pdfLiveStrokes.isNotEmpty())
                 releaseParentIntercept()
+                pdfInkPreview.postInvalidateOnAnimation()
                 dryView.postInvalidateOnAnimation()
             }
             MotionEvent.ACTION_CANCEL -> {
                 pdfLiveStrokes.clear()
                 onAuthoringChanged(false)
                 releaseParentIntercept()
-                dryView.postInvalidateOnAnimation()
+                pdfInkPreview.postInvalidateOnAnimation()
             }
         }
         return true
@@ -1225,17 +1233,51 @@ class InkPageView(context: Context) : FrameLayout(context) {
         const val MAX_CELLS_PER_STROKE = 64
     }
 
+    // Invalidating this transparent overlay never redraws the PDF or dry ink.
+    // All coordinates are in the same world space as the bounded DryInkView.
+    private inner class PdfInkPreviewView(context: Context) : View(context) {
+        private val previewPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+        }
+
+        init { isClickable = false; isFocusable = false }
+
+        override fun onDraw(canvas: Canvas) {
+            if (pdfLiveStrokes.isEmpty()) return
+            canvas.save()
+            canvas.translate(-renderOriginX.toFloat(), -renderOriginY.toFloat())
+            canvas.concat(worldToView)
+            pdfLiveStrokes.values.forEach { live ->
+                val baseColor = live.brush.colorArgb
+                previewPaint.color = when {
+                    live.lasso -> 0xff1976d2.toInt()
+                    live.brush.kind == BrushKind.HIGHLIGHTER && (baseColor ushr 24) == 0xff ->
+                        (0x66 shl 24) or (baseColor and 0xffffff)
+                    else -> baseColor
+                }
+                previewPaint.strokeWidth = if (live.lasso) 3.2f else live.brush.size
+                if (live.pointCount == 1) {
+                    previewPaint.style = Paint.Style.FILL
+                    canvas.drawCircle(
+                        live.lastX, live.lastY, previewPaint.strokeWidth / 2f, previewPaint,
+                    )
+                    previewPaint.style = Paint.Style.STROKE
+                } else {
+                    canvas.drawPath(live.path, previewPaint)
+                }
+            }
+            canvas.restore()
+        }
+    }
+
     private inner class DryInkView(context: Context) : View(context) {
         private val renderer = CanvasStrokeRenderer.create()
         private val transform = Matrix()
         private val paperPaint = Paint().apply { color = Color.WHITE }
         private val outsidePaint = Paint().apply { color = Color.rgb(238, 238, 238) }
         private val imagePaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        private val pdfStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.STROKE
-            strokeCap = Paint.Cap.ROUND
-            strokeJoin = Paint.Join.ROUND
-        }
         private val selectionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.rgb(25, 118, 210)
             style = Paint.Style.STROKE
@@ -1252,30 +1294,42 @@ class InkPageView(context: Context) : FrameLayout(context) {
         private val cells = HashMap<Long, MutableList<Int>>()
         private val spanningStrokes = ArrayList<Int>()
         private val indexedBounds = ArrayList<RectF?>()
+        private val indexedStrokes = ArrayList<RuntimeStroke>()
         private var indexedPage: PageSession? = null
         private var indexedVersion = -1
 
         private fun rebuildIndexIfNeeded(current: PageSession) {
-            if (indexedPage === current && indexedVersion == current.contentVersion) return
-            if (indexedPage !== current) cachedBounds.clear()
-            indexedPage = current
-            indexedVersion = current.contentVersion
-            cells.clear()
-            spanningStrokes.clear()
-            indexedBounds.clear()
-            val retained = IdentityHashMap<RuntimeStroke, RectF>()
-            current.strokes.forEachIndexed { index, runtime ->
+            if (indexedPage === current && indexedVersion == current.contentVersion &&
+                indexedStrokes.size == current.strokes.size
+            ) return
+
+            // Appending a pen stroke is the common case. Preserve all cached bounds and
+            // spatial bins rather than re-building O(totalStrokes) geometry on every up.
+            val appendOnly = indexedPage === current &&
+                current.strokes.size >= indexedStrokes.size &&
+                indexedStrokes.indices.all { indexedStrokes[it] === current.strokes[it] }
+
+            if (!appendOnly) {
+                cachedBounds.clear()
+                cells.clear()
+                spanningStrokes.clear()
+                indexedBounds.clear()
+                indexedStrokes.clear()
+            }
+            val start = indexedStrokes.size
+            for (index in start until current.strokes.size) {
+                val runtime = current.strokes[index]
                 val bounds = cachedBounds[runtime] ?: runtime.stroke.shape.computeBoundingBox()?.let {
                     val pad = max(1f, runtime.stored.brush.size * 1.5f)
                     RectF(it.xMin - pad, it.yMin - pad, it.xMax + pad, it.yMax + pad)
                 }
-                if (bounds == null) {
-                    indexedBounds.add(null)
-                    spanningStrokes.add(index)
-                    return@forEachIndexed
-                }
-                retained[runtime] = bounds
+                indexedStrokes.add(runtime)
                 indexedBounds.add(bounds)
+                if (bounds == null) {
+                    spanningStrokes.add(index)
+                    continue
+                }
+                cachedBounds[runtime] = bounds
                 val left = floor(bounds.left / STROKE_CELL_SIZE).toInt()
                 val top = floor(bounds.top / STROKE_CELL_SIZE).toInt()
                 val right = floor(bounds.right / STROKE_CELL_SIZE).toInt()
@@ -1291,8 +1345,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
                     }
                 }
             }
-            cachedBounds.clear()
-            cachedBounds.putAll(retained)
+            indexedPage = current
+            indexedVersion = current.contentVersion
         }
 
         private fun findVisibleStrokeIndices(current: PageSession): List<Int> {
@@ -1353,26 +1407,6 @@ class InkPageView(context: Context) : FrameLayout(context) {
             // Canvas must already contain the same transform used for the PDF and page images.
             for (index in findVisibleStrokeIndices(current)) {
                 renderer.draw(canvas, current.strokes[index].stroke, transform)
-            }
-            // Preview PDF pen input using a plain Canvas path. No V33 renderer
-            // initialization is needed until the final editable stroke exists.
-            pdfLiveStrokes.values.forEach { live ->
-                val baseColor = live.brush.colorArgb
-                pdfStrokePaint.color = if (!live.lasso &&
-                    live.brush.kind == BrushKind.HIGHLIGHTER &&
-                    (baseColor ushr 24) == 0xff
-                ) (0x66 shl 24) or (baseColor and 0xffffff) else baseColor
-                if (live.lasso) pdfStrokePaint.color = 0xff1976d2.toInt()
-                pdfStrokePaint.strokeWidth = if (live.lasso) 3.2f else live.brush.size
-                if (live.pointCount == 1) {
-                    pdfStrokePaint.style = Paint.Style.FILL
-                    canvas.drawCircle(
-                        live.lastX, live.lastY, pdfStrokePaint.strokeWidth / 2f, pdfStrokePaint,
-                    )
-                    pdfStrokePaint.style = Paint.Style.STROKE
-                } else {
-                    canvas.drawPath(live.path, pdfStrokePaint)
-                }
             }
             canvas.restore()
 

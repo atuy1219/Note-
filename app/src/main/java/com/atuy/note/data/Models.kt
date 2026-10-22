@@ -591,6 +591,9 @@ data class NoteSaveSnapshot(
     val imageFiles: Map<String, File>,
     val strokes: List<RuntimeStroke>,
     val editGeneration: Long,
+    val updateThumbnail: Boolean,
+    val thumbnailPageId: String?,
+    val thumbnailPageVersion: Int,
 )
 
 class NoteSession(
@@ -610,6 +613,8 @@ class NoteSession(
     var revision by mutableStateOf(document.revision)
     var dirty by mutableStateOf(false)
     private var editGeneration = 0L
+    private var thumbnailPageId: String? = document.pages.firstOrNull()?.id
+    private var thumbnailPageVersion = 0
     var activePageIndex by mutableIntStateOf(0)
     var pageNavigationVersion by mutableIntStateOf(0)
         private set
@@ -634,9 +639,18 @@ class NoteSession(
         imageFiles = imageFiles.toMap(),
         strokes = pages.flatMap { it.strokes.toList() },
         editGeneration = editGeneration,
+        updateThumbnail = pages.firstOrNull()?.let {
+            it.id != thumbnailPageId || it.contentVersion != thumbnailPageVersion
+        } ?: false,
+        thumbnailPageId = pages.firstOrNull()?.id,
+        thumbnailPageVersion = pages.firstOrNull()?.contentVersion ?: 0,
     )
 
     fun completeSave(snapshot: NoteSaveSnapshot) {
+        if (snapshot.updateThumbnail) {
+            thumbnailPageId = snapshot.thumbnailPageId
+            thumbnailPageVersion = snapshot.thumbnailPageVersion
+        }
         revision = snapshot.document.revision
         updatedAt = snapshot.document.updatedAt
         dirty = editGeneration != snapshot.editGeneration
