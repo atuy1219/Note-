@@ -40,7 +40,8 @@ import java.util.IdentityHashMap
 
 class InkPageView(context: Context) : FrameLayout(context) {
     private val dryView = DryInkView(context)
-    private val wetView = InProgressStrokesView(context)
+    private var wetView = InProgressStrokesView(context)
+    private var wetOverlayWasDetached = false
     // The parent retains virtual page coordinates; the children render only visible pixels.
     private val visibleLayerBounds = Rect()
     private val wetLayerTransform = Matrix()
@@ -161,23 +162,16 @@ class InkPageView(context: Context) : FrameLayout(context) {
         addView(dryView, LayoutParams(1, 1))
         addView(wetView, LayoutParams(1, 1))
         isFocusableInTouchMode = true
-        wetView.isClickable = false
-        wetView.isFocusable = false
-        // AndroidX Ink 1.1's V33 low-latency helper can race when a LazyList
-        // detaches and reattaches a page: a pending completion from the old
-        // HandlerThread may run after the helper has replaced its render executor.
-        // Until AndroidX fixes this, use the HWUI renderer, which does not own
-        // the V33 front-buffer thread. This increases wet ink latency slightly
-        // but preserves brush fidelity, stroke data and the optimized dry layer.
-        // Must be configured before the first stroke initializes the helper.
-        @Suppress("DEPRECATION")
-        wetView.useHighLatencyRenderHelper = true
-        // Ink receives the same raw MotionEvents as this exactly-overlaid view.
-        wetView.motionEventToViewTransform = wetLayerTransform
+        configureWetOverlay(wetView)
         scaleDetector.isQuickScaleEnabled = false
-        // No eagerInit(): pages offscreen or briefly composed during spread navigation
-        // must not acquire render threads or SurfaceViews until actually inked.
-        wetView.addFinishedStrokesListener(object : InProgressStrokesFinishedListener {
+        // No eagerInit(): offscreen pages do not spin up a V33 front-buffer thread.
+    }
+
+    private fun configureWetOverlay(overlay: InProgressStrokesView) {
+        overlay.isClickable = false
+        overlay.isFocusable = false
+        overlay.motionEventToViewTransform = wetLayerTransform
+        overlay.addFinishedStrokesListener(object : InProgressStrokesFinishedListener {
             override fun onStrokesFinished(strokes: Map<InProgressStrokeId, Stroke>) {
                 strokes.forEach { (id, stroke) ->
                     if (lassoStrokeIds.remove(id)) {
@@ -203,7 +197,8 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 // Camera mutations are deferred during this handoff so both layers always share one view.
                 dryView.postInvalidateOnAnimation()
                 postOnAnimation {
-                    wetView.removeFinishedStrokes(finishedIds)
+                    // Use the originating overlay even if this page has since been detached.
+                    overlay.removeFinishedStrokes(finishedIds)
                     pendingFinishedStrokeIds.removeAll(finishedIds)
                     onAuthoringChanged(pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty())
                     flushPendingViewportMutations()
@@ -212,6 +207,29 @@ class InkPageView(context: Context) : FrameLayout(context) {
                 }
             }
         })
+    }
+
+    private fun replaceDetachedWetOverlay() {
+        // Ink 1.1 V33 replaces its render executor when the SAME view reattaches.
+        // Asynchronous hardware buffer callbacks from its OLD executor can still
+        // run and trigger assertOnRenderThread against the new executor.
+        // Replacing the overlay keeps each render helper bound to one thread generation.
+        val oldOverlay = wetView
+        val newOverlay = InProgressStrokesView(context)
+        configureWetOverlay(newOverlay)
+        removeView(oldOverlay)
+        wetView = newOverlay
+        addView(newOverlay, LayoutParams(1, 1))
+        renderWidth = 0
+        renderHeight = 0
+        if (pointerStrokes.isNotEmpty() || pendingFinishedStrokeIds.isNotEmpty()) {
+            pointerStrokes.clear()
+            pendingFinishedStrokeIds.clear()
+            strokeBrushSpecs.clear()
+            lassoStrokeIds.clear()
+            pendingViewportMutations.clear()
+            onAuthoringChanged(false)
+        }
     }
 
     fun bind(
@@ -300,6 +318,12 @@ class InkPageView(context: Context) : FrameLayout(context) {
     }
 
     override fun onAttachedToWindow() {
+        // Replace the old Ink view BEFORE its ViewGroup reattaches children,
+        // otherwise V33 may reuse the old renderer and swap its render thread.
+        if (wetOverlayWasDetached) {
+            replaceDetachedWetOverlay()
+            wetOverlayWasDetached = false
+        }
         super.onAttachedToWindow()
         viewTreeObserver.addOnPreDrawListener(visibleLayerListener)
     }
@@ -308,6 +332,7 @@ class InkPageView(context: Context) : FrameLayout(context) {
         if (viewTreeObserver.isAlive) {
             viewTreeObserver.removeOnPreDrawListener(visibleLayerListener)
         }
+        wetOverlayWasDetached = true
         super.onDetachedFromWindow()
     }
 
