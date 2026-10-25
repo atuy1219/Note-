@@ -13,6 +13,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.ink.strokes.Stroke
 import com.atuy.note.data.BrushSelection
+import com.atuy.note.data.EraserMode
+import com.atuy.note.data.MeshErasePoint
+import com.atuy.note.data.MeshErasePath
+import com.atuy.note.data.MeshEraser
 import com.atuy.note.data.BrushKind
 import com.atuy.note.data.BrushSpec
 import com.atuy.note.data.CustomBrushSpec
@@ -34,6 +38,9 @@ import com.atuy.note.sync.DriveSyncManager
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -58,6 +65,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         private set
     var toolMode by mutableStateOf(ToolMode.PEN)
         private set
+    var eraserMode by mutableStateOf(
+        runCatching {
+            EraserMode.valueOf(preferences.getString("eraser_mode", EraserMode.STROKE.name)!!)
+        }.getOrDefault(EraserMode.STROKE)
+    )
+        private set
+    var eraserDiameterPx by mutableStateOf(
+        preferences.getFloat("eraser_diameter_px", 56f).coerceIn(8f, 160f)
+    )
+        private set
+
+    private data class PendingMeshErase(
+        val page: PageSession,
+        var radius: Float = 0f,
+        val points: MutableList<MeshErasePoint> = mutableListOf(),
+        var generation: Int = 0,
+        var completed: Boolean = false,
+        var started: Boolean = false,
+        var appliedGeneration: Int = -1,
+        var expectedVersion: Int = -1,
+        var original: List<RuntimeStroke> = emptyList(),
+        var worker: Job? = null,
+    )
+    private val meshWorkerMutex = Mutex()
+    private var pendingMeshErase: PendingMeshErase? = null
     private var brushSelection = runCatching {
         Json.decodeFromString<BrushSelection>(preferences.getString("brush_selection", null) ?: "{}")
     }.getOrDefault(BrushSelection())
@@ -447,6 +479,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         setTool(if (toolMode == ToolMode.ERASER) ToolMode.PEN else ToolMode.ERASER)
     }
 
+    fun chooseEraserMode(mode: EraserMode) {
+        eraserMode = mode
+        preferences.edit().putString("eraser_mode", mode.name).apply()
+        setTool(ToolMode.ERASER)
+    }
+
+    fun updateEraserDiameterPx(diameter: Float) {
+        eraserDiameterPx = diameter.coerceIn(8f, 160f)
+        preferences.edit().putFloat("eraser_diameter_px", eraserDiameterPx).apply()
+    }
+
     fun updateBrush(colorArgb: Int = brushSpec.colorArgb, size: Float = brushSpec.size) {
         val resolvedColor = if (brushSpec.kind == BrushKind.HIGHLIGHTER) {
             (0x66 shl 24) or (colorArgb and 0x00FFFFFF)
@@ -568,9 +611,110 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         markDirty(page)
     }
 
-    fun beginErase(page: PageSession) { page.beginEraseGesture() }
-    fun eraseAt(page: PageSession, x: Float, y: Float, radius: Float) { page.eraseAt(x, y, radius) }
-    fun endErase(page: PageSession) { if (page.endEraseGesture()) markDirty(page) }
+    fun beginErase(page: PageSession) {
+        if (eraserMode == EraserMode.MESH) {
+            pendingMeshErase = PendingMeshErase(page)
+        } else {
+            page.beginEraseGesture()
+        }
+    }
+
+    fun eraseAt(page: PageSession, x: Float, y: Float, radius: Float) {
+        val pending = pendingMeshErase
+        if (pending?.page === page && !pending.completed) {
+            if (!x.isFinite() || !y.isFinite() || !radius.isFinite()) return
+            if (pending.points.isEmpty()) pending.radius = radius
+            val last = pending.points.lastOrNull()
+            val minDistance = radius.coerceAtLeast(1f) / 8f
+            if (last == null || kotlin.math.hypot(last.x - x, last.y - y) >= minDistance) {
+                pending.points.add(MeshErasePoint(x, y))
+                pending.generation++
+                pumpMeshErase(pending)
+            }
+        } else if (pending == null) {
+            page.eraseAt(x, y, radius)
+        }
+    }
+
+    fun endErase(page: PageSession) {
+        val pending = pendingMeshErase
+        if (pending?.page === page) {
+            pendingMeshErase = null
+            pending.completed = true
+            pumpMeshErase(pending)
+        } else if (pending == null && page.endEraseGesture()) {
+            markDirty(page)
+        }
+    }
+
+    private fun pumpMeshErase(pending: PendingMeshErase) {
+        if (pending.worker?.isActive == true) return
+        pending.worker = viewModelScope.launch {
+            // Serializing gestures avoids an older operation overwriting a newer one.
+            meshWorkerMutex.withLock {
+                val page = pending.page
+                if (!pending.started) {
+                    page.beginEraseGesture()
+                    pending.original = page.strokes.toList()
+                    pending.expectedVersion = page.contentVersion
+                    pending.started = true
+                }
+                try {
+                    while (pending.appliedGeneration != pending.generation) {
+                        val snapshotGeneration = pending.generation
+                        val path = MeshErasePath(pending.radius, pending.points.toList())
+                        val calculated = withContext(Dispatchers.Default) {
+                            MeshEraser.apply(pending.original, path)
+                        }
+                        if (!page.previewMeshErase(pending.expectedVersion, calculated)) {
+                            statusMessage = "消去中にページが変更されたため、操作を中断しました"
+                            break
+                        }
+                        pending.expectedVersion = page.contentVersion
+                        pending.appliedGeneration = snapshotGeneration
+                        // Let Android compose/draw the partial cut before next update.
+                        yield()
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    statusMessage = "メッシュ消去エラー: ${error.message ?: "geometry failure"}"
+                } finally {
+                    if (pending.completed) {
+                        if (page.endEraseGesture()) markDirty(page)
+                    }
+                }
+            }
+            pending.worker = null
+            // A MOVE / UP event may arrive while the previous worker is completing.
+            if (pending.completed && pending.appliedGeneration != pending.generation) {
+                // Do not start another worker after endEraseGesture has closed history.
+                statusMessage = "一部の消去入力を処理できませんでした"
+            }
+        }
+    }
+
+    /**
+     * Erase document annotations only: the imported PDF and all pages are retained.
+     * Each page gets its own undo entry, including the all-pages operation.
+     */
+    fun clearPdfMarkups(allPages: Boolean) {
+        val session = activeSession ?: return
+        if (session.sourcePdfFile == null) return
+        val pages = if (allPages) session.pages.toList() else
+            listOfNotNull(session.pages.getOrNull(session.activePageIndex))
+        var cleared = 0
+        pages.forEach { page ->
+            if (page.clearMarkups(includePlacedImages = true)) {
+                cleared++
+            }
+        }
+        if (cleared > 0) {
+            markDirty(session)
+            statusMessage = if (allPages) "${cleared}ページのマークアップを削除しました" else
+                "このページのマークアップを削除しました"
+        }
+    }
 
     fun selectWithLasso(page: PageSession, lasso: Stroke) {
         val count = page.selectWithLasso(lasso.inputs, lassoCoverageMode)
